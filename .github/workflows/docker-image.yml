@@ -38,7 +38,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/${{ env.owner_lc }}/od2api_plus:latest
+          tags: ghcr.io/${{ env.owner_lc }}/scria2api:latest
 
       - name: Logout from GitHub Container Registry
         run: docker logout ghcr.io
