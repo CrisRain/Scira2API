@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  # Scira2API应用服务
+  scira2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: scira2api:latest
+    container_name: scira2api
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      USERIDS: xxx,yyy
