@@ -1,21 +1,23 @@
 # Scira2api
-Transform [scira's web service](https://mcp.scira.ai/)  into an API service, The API supports access in the OpenAI format.
 
-## ✨ Features
+将 [Scira 的网页服务](https://mcp.scira.ai/) 转换为 API 服务，支持 OpenAI 格式的访问。
 
-- 🔁 **UserId Polling** - userId polling with support for multiple userIds.
-- 📝 **Automatic Conversation Management** -  Conversation can be automatically deleted after use
-- 🌊 **Streaming Responses** - Get real-time streaming outputs 
-- 🌐 **Proxy Support** - Route requests through your preferred proxy
-- 🔐 **API Key Authentication** - Secure your API endpoints
-- 🔁 **Automatic Retry** - Feature to automatically retry requests when request fail
+## ✨ 特性
 
-## 📋 Prerequisites
+- 🔁 **UserId 轮询** - 支持多个 userIds 的轮询机制
+- 📝 **自动会话管理** - 使用后可自动删除会话
+- 🌊 **流式响应** - 获取实时流式输出
+- 🌐 **代理支持** - 通过您首选的代理路由请求
+- 🔐 **API 密钥认证** - 保护您的 API 端点
+- 🔁 **自动重试** - 请求失败时自动重试
+- 🚀 **高性能 HTTP 客户端** - 使用 go-resty 库实现高效的 HTTP 请求
 
-- Go 1.24+ (for building from source)
-- Docker (for containerized deployment)
+## 📋 先决条件
 
-## 🚀 Deployment Options
+- Go 1.24+ (从源代码构建)
+- Docker (容器化部署)
+
+## 🚀 部署选项
 
 ### Docker
 
@@ -34,7 +36,7 @@ docker run -d \
 
 ### Docker Compose
 
-Create a `docker-compose.yml` file:
+创建 `docker-compose.yml` 文件:
 
 ```yaml
 version: '3'
@@ -45,95 +47,91 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - USERIDS=xxx,yyy  # Required
-      - APIKEY=sk-123  # Optional
-      - CHAT_DELETE=true  # Optional
-      - HTTP_PROXY=http://127.0.0.1:7890  # Optional
-      - MODELS=gpt-4.1-mini,claude-3-7-sonnet,grok-3-mini,qwen-qwq   # Optional
-      - RETRY=3  # Optional
+      - USERIDS=xxx,yyy  # 必需
+      - APIKEY=sk-123  # 可选
+      - CHAT_DELETE=true  # 可选
+      - HTTP_PROXY=http://127.0.0.1:7890  # 可选
+      - MODELS=gpt-4.1-mini,claude-3-7-sonnet,grok-3-mini,qwen-qwq   # 可选
+      - RETRY=3  # 可选
     restart: unless-stopped
-
 ```
 
-Then run:
+然后运行:
 
 ```bash
 docker-compose up -d
 ```
 
-Or：
+或者:
 
 ```bash
-# Clone the repository
+# 克隆仓库
 git clone https://github.com/coderZoe/scira2api.git
 cd scira2api
-# edit environment
+# 编辑环境变量
 vi docker-compose.yml
 ./deploy.sh
 ```
 
-
-
-### Direct Deployment
+### 直接部署
 
 ```bash
-# Clone the repository
+# 克隆仓库
 git clone https://github.com/coderZoe/scira2api.git
 cd scira2api
 cp .env.example .env  
 vim .env  
-# Build the binary
+# 构建二进制文件
 go build -o scira2api .
 
 ./scira2api
 ```
 
-## ⚙️ Configuration
+## ⚙️ 配置
 
-### ENV Configuration
+### 环境变量配置
 
-You can configure `scira2api` using a `.env` file in the application's root directory. If this file exists, it will be used instead of environment variables.
+您可以使用应用程序根目录中的 `.env` 文件配置 `scira2api`。如果此文件存在，将优先使用它而不是环境变量。
 
-Example `.env`:
+示例 `.env`:
 
 ```yaml
-# Required, separate multiple userIds with English commas
+# 必需，使用英文逗号分隔多个 userIds
 USERIDS= xxx,yyy
 
-# Optional, PORT. Default: 8080
+# 可选，端口。默认: 8080
 PORT=8080
 
-# Optional, API key for authenticating client requests (e.g., the key entered for openweb-ui requests). If empty, no authentication is required.
+# 可选，用于验证客户端请求的 API 密钥（例如，为 openweb-ui 请求输入的密钥）。如果为空，则不需要认证。
 APIKEY=sk-xxx
 
-# Optional, Proxy address. Default: No proxy is used.
+# 可选，代理地址。默认: 不使用代理。
 HTTP_PROXY= http://127.0.0.1:7890
 
-# Optional, List of models, separated by English commas.
+# 可选，模型列表，用英文逗号分隔。
 MODELS=gpt-4.1-mini,claude-3-7-sonnet,grok-3-mini,qwen-qwq
 
-# Optional, Number of retry attempts on request failure. 0 or 1 means no retry. Default: 0 (no retry). A different userId will be used for each retry.
+# 可选，请求失败时的重试次数。0 或 1 表示不重试。默认: 0（不重试）。每次重试将使用不同的 userId。
 RETRY=3
 
-# Optional, Whether to delete chat history on the page. Default: false (do not delete).
+# 可选，是否删除页面上的聊天历史。默认: false（不删除）。
 CHAT_DELETE=true
 ```
 
-A sample configuration file is provided as `.env.example` in the repository.
+仓库中提供了一个示例配置文件 `.env.example`。
 
+## 📝 API 使用
 
-## 📝 API Usage
+### 认证
 
-### Authentication
-
-Include your API key in the request header:
+在请求头中包含您的 API 密钥:
 
 ```bash
-# no need if you not config apiKey
+# 如果未配置 apiKey，则不需要
 Authorization: Bearer YOUR_API_KEY
 ```
 
-### Chat Completion
+### 聊天补全
 
 ```bash
 curl -X POST http://localhost:8080/v1/chat/completions \
@@ -144,28 +142,37 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     "messages": [
       {
         "role": "user",
-        "content": "Hello, Man!"
+        "content": "你好，请问你是谁？"
       }
     ],
     "stream": true
   }'
 ```
 
+## 🛠️ 技术实现
 
-## 🤝 Contributing
+本项目使用 [go-resty](https://github.com/go-resty/resty) 库作为 HTTP 客户端，它是一个简单而强大的 Go HTTP 客户端库，提供以下优势：
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+- 简洁的 API 设计
+- 支持中间件和拦截器
+- 内置重试机制
+- 高效的流式处理
+- 广泛的社区支持和维护
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+## 🤝 贡献
 
-## 📄 License
+欢迎贡献！请随时提交 Pull Request。
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+1. Fork 仓库
+2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
+3. 提交您的更改 (`git commit -m 'Add some amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 打开 Pull Request
+
+## 📄 许可证
+
+本项目采用 MIT 许可证 - 详情请参阅 [LICENSE](LICENSE) 文件。
 
 ---
 
-Made with ❤️ by[coderZoe](https://github.com/coderZoe)
+由 [coderZoe](https://github.com/coderZoe) 用 ❤️ 制作

@@ -8,10 +8,10 @@ PORT=8080
 APIKEY=sk-xxx
 
 # Optional, Proxy address. Default: No proxy is used.
-HTTP_PROXY= http://127.0.0.1:7890
+# HTTP_PROXY= http://127.0.0.1:7890
 
 # Optional, List of models, separated by English commas.
-MODELS=gpt-4.1-mini,claude-3-7-sonnet,grok-3-mini,qwen-qwq
+MODELS=scira-anthropic,scira-4o,scira-grok-3,scira-google
 
 # Optional, Number of retry attempts on request failure. 0 or 1 means no retry. Default: 0 (no retry). A different userId will be used for each retry.
 RETRY=3
