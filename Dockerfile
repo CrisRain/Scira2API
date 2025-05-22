@@ -2,7 +2,7 @@
 FROM golang:1.24-alpine AS builder
 
 # 设置Go环境变量
-ENV GOPROXY=https://goproxy.cn,direct
+# ENV GOPROXY=https://goproxy.cn,direct
 ENV GO111MODULE=on
 ENV CGO_ENABLED=0
 
