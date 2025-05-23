@@ -102,24 +102,21 @@ func (c *Config) loadAuthConfig() error {
 	c.Auth.ApiKey = os.Getenv("APIKEY")
 
 	userIdsEnv := os.Getenv("USERIDS")
-	if userIdsEnv == "" {
-		return errors.ErrMissingUserIDs
-	}
-
-	userIds := strings.Split(userIdsEnv, ",")
-	// 清理用户ID，移除空白字符
-	var cleanUserIds []string
-	for _, id := range userIds {
-		if trimmed := strings.TrimSpace(id); trimmed != "" {
-			cleanUserIds = append(cleanUserIds, trimmed)
+	if userIdsEnv != "" {
+		userIds := strings.Split(userIdsEnv, ",")
+		// 清理用户ID，移除空白字符
+		var cleanUserIds []string
+		for _, id := range userIds {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				cleanUserIds = append(cleanUserIds, trimmed)
+			}
 		}
+		c.Auth.UserIds = cleanUserIds
+	} else {
+		// 如果没有设置USERIDS，使用默认用户ID
+		c.Auth.UserIds = []string{constants.DefaultUserId}
 	}
-
-	if len(cleanUserIds) == 0 {
-		return errors.ErrEmptyUserList
-	}
-
-	c.Auth.UserIds = cleanUserIds
+	
 	return nil
 }
 
@@ -168,11 +165,6 @@ func (c *Config) validate() error {
 	// 验证端口
 	if port, err := strconv.Atoi(c.Server.Port); err != nil || port <= 0 || port > 65535 {
 		return fmt.Errorf("invalid port: %s", c.Server.Port)
-	}
-
-	// 验证用户ID
-	if len(c.Auth.UserIds) == 0 {
-		return fmt.Errorf("at least one user ID is required")
 	}
 
 	// 验证模型

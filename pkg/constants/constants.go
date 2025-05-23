@@ -28,6 +28,7 @@ const (
 	ProviderScira             = "scira"
 	ChatGroup                 = "chat"
 	DefaultTimeZone           = "Asia/Shanghai"
+	DefaultUserId             = "default_user" // 默认用户ID
 )
 
 // 流式响应常量
