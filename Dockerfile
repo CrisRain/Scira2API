@@ -25,6 +25,8 @@ RUN go mod download && go mod verify
 # 复制源代码
 COPY . .
 
+# 整理模块依赖
+RUN go mod tidy
 # 验证模块状态并构建应用
 RUN echo "=== Module Information ===" && \
     go version && \
