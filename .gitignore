@@ -87,4 +87,5 @@ data.db
 
 *_debug_bin*
 
-.cursor
+.cursor/
+memory-bank/
