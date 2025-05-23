@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"scira2api/log"
 	"scira2api/pkg/constants"
 	"scira2api/pkg/errors"
@@ -16,11 +17,14 @@ import (
 
 // Config 应用配置结构
 type Config struct {
-	Server          ServerConfig `json:"server"`
-	Auth            AuthConfig   `json:"auth"`
-	Client          ClientConfig `json:"client"`
-	AvailableModels ModelsConfig `json:"models"`
-	Chat            ChatConfig   `json:"chat"`
+	Server          ServerConfig    `json:"server"`
+	Auth            AuthConfig      `json:"auth"`
+	Client          ClientConfig    `json:"client"`
+	AvailableModels ModelsConfig    `json:"models"`
+	Chat            ChatConfig      `json:"chat"`
+	Cache           CacheConfig     `json:"cache"`
+	ConnPool        ConnPoolConfig  `json:"conn_pool"`
+	RateLimit       RateLimitConfig `json:"rate_limit"`
 }
 
 // ServerConfig 服务器配置
@@ -54,6 +58,30 @@ type ChatConfig struct {
 	Delete bool `json:"delete"`
 }
 
+// CacheConfig 缓存配置
+type CacheConfig struct {
+	Enabled         bool          `json:"enabled"`
+	ModelCacheTTL   time.Duration `json:"model_cache_ttl"`
+	ResponseCacheTTL time.Duration `json:"response_cache_ttl"`
+	CleanupInterval time.Duration `json:"cleanup_interval"`
+}
+
+// ConnPoolConfig 连接池配置
+type ConnPoolConfig struct {
+	Enabled             bool          `json:"enabled"`
+	MaxIdleConns        int           `json:"max_idle_conns"`
+	MaxConnsPerHost     int           `json:"max_conns_per_host"`
+	MaxIdleConnsPerHost int           `json:"max_idle_conns_per_host"`
+	IdleConnTimeout     time.Duration `json:"idle_conn_timeout"`
+}
+
+// RateLimitConfig 速率限制配置
+type RateLimitConfig struct {
+	Enabled     bool    `json:"enabled"`
+	RequestsPerSecond float64 `json:"requests_per_second"`
+	Burst       int     `json:"burst"`
+}
+
 // NewConfig 创建新的配置实例
 func NewConfig() (*Config, error) {
 	// 加载环境变量文件
@@ -73,6 +101,9 @@ func NewConfig() (*Config, error) {
 		{"client", config.loadClientConfig},
 		{"models", config.loadModelsConfig},
 		{"chat", config.loadChatConfig},
+		{"cache", config.loadCacheConfig},
+		{"conn_pool", config.loadConnPoolConfig},
+		{"rate_limit", config.loadRateLimitConfig},
 	}
 
 	for _, cl := range configLoaders {
@@ -157,6 +188,109 @@ func (c *Config) loadChatConfig() error {
 		return fmt.Errorf("CHAT_DELETE must be true or false, got: %s", chatDeleteStr)
 	}
 	c.Chat.Delete = chatDelete
+	return nil
+}
+
+// loadCacheConfig 加载缓存配置
+func (c *Config) loadCacheConfig() error {
+	// 是否启用缓存
+	cacheEnabledStr := getEnvWithDefault(constants.EnvCacheEnabled, "true")
+	cacheEnabled, err := strconv.ParseBool(cacheEnabledStr)
+	if err != nil {
+		return fmt.Errorf("%s must be true or false, got: %s", constants.EnvCacheEnabled, cacheEnabledStr)
+	}
+	c.Cache.Enabled = cacheEnabled
+	
+	// 模型缓存TTL
+	modelCacheTTLStr := getEnvWithDefault(constants.EnvModelCacheTTL, "")
+	if modelCacheTTLStr != "" {
+		modelCacheTTL, err := time.ParseDuration(modelCacheTTLStr)
+		if err != nil {
+			return fmt.Errorf("invalid %s: %s, error: %v", constants.EnvModelCacheTTL, modelCacheTTLStr, err)
+		}
+		c.Cache.ModelCacheTTL = modelCacheTTL
+	} else {
+		c.Cache.ModelCacheTTL = constants.DefaultModelCacheTTL
+	}
+	
+	// 响应缓存TTL
+	respCacheTTLStr := getEnvWithDefault(constants.EnvRespCacheTTL, "")
+	if respCacheTTLStr != "" {
+		respCacheTTL, err := time.ParseDuration(respCacheTTLStr)
+		if err != nil {
+			return fmt.Errorf("invalid %s: %s, error: %v", constants.EnvRespCacheTTL, respCacheTTLStr, err)
+		}
+		c.Cache.ResponseCacheTTL = respCacheTTL
+	} else {
+		c.Cache.ResponseCacheTTL = constants.DefaultResponseCacheTTL
+	}
+	
+	// 清理间隔
+	cleanupIntervalStr := getEnvWithDefault(constants.EnvCleanupInterval, "")
+	if cleanupIntervalStr != "" {
+		cleanupInterval, err := time.ParseDuration(cleanupIntervalStr)
+		if err != nil {
+			return fmt.Errorf("invalid %s: %s, error: %v", constants.EnvCleanupInterval, cleanupIntervalStr, err)
+		}
+		c.Cache.CleanupInterval = cleanupInterval
+	} else {
+		c.Cache.CleanupInterval = constants.DefaultCleanupInterval
+	}
+	
+	return nil
+}
+
+// loadConnPoolConfig 加载连接池配置
+func (c *Config) loadConnPoolConfig() error {
+	// 是否启用连接池
+	connPoolEnabledStr := getEnvWithDefault("CONN_POOL_ENABLED", "true")
+	connPoolEnabled, err := strconv.ParseBool(connPoolEnabledStr)
+	if err != nil {
+		return fmt.Errorf("CONN_POOL_ENABLED must be true or false, got: %s", connPoolEnabledStr)
+	}
+	c.ConnPool.Enabled = connPoolEnabled
+	
+	// 最大空闲连接数
+	c.ConnPool.MaxIdleConns = getEnvAsInt("MAX_IDLE_CONNS", 100)
+	
+	// 每个主机的最大连接数
+	c.ConnPool.MaxConnsPerHost = getEnvAsInt("MAX_CONNS_PER_HOST", runtime.NumCPU()*2)
+	
+	// 每个主机的最大空闲连接数
+	c.ConnPool.MaxIdleConnsPerHost = getEnvAsInt("MAX_IDLE_CONNS_PER_HOST", runtime.NumCPU())
+	
+	// 空闲连接超时
+	idleConnTimeoutStr := getEnvWithDefault("IDLE_CONN_TIMEOUT", "90s")
+	idleConnTimeout, err := time.ParseDuration(idleConnTimeoutStr)
+	if err != nil {
+		return fmt.Errorf("invalid IDLE_CONN_TIMEOUT: %s, error: %v", idleConnTimeoutStr, err)
+	}
+	c.ConnPool.IdleConnTimeout = idleConnTimeout
+	
+	return nil
+}
+
+// loadRateLimitConfig 加载速率限制配置
+func (c *Config) loadRateLimitConfig() error {
+	// 是否启用速率限制
+	rateLimitEnabledStr := getEnvWithDefault("RATE_LIMIT_ENABLED", "true")
+	rateLimitEnabled, err := strconv.ParseBool(rateLimitEnabledStr)
+	if err != nil {
+		return fmt.Errorf("RATE_LIMIT_ENABLED must be true or false, got: %s", rateLimitEnabledStr)
+	}
+	c.RateLimit.Enabled = rateLimitEnabled
+	
+	// 每秒请求数
+	requestsPerSecondStr := getEnvWithDefault("REQUESTS_PER_SECOND", "10")
+	requestsPerSecond, err := strconv.ParseFloat(requestsPerSecondStr, 64)
+	if err != nil {
+		return fmt.Errorf("invalid REQUESTS_PER_SECOND: %s, error: %v", requestsPerSecondStr, err)
+	}
+	c.RateLimit.RequestsPerSecond = requestsPerSecond
+	
+	// 突发请求数
+	c.RateLimit.Burst = getEnvAsInt("BURST", 20)
+	
 	return nil
 }
 

@@ -13,8 +13,8 @@ import (
 	"github.com/go-resty/resty/v2"
 )
 
-// handleRegularResponse 处理常规响应（非流式）
-func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response, model string) {
+// processRegularResponse 处理常规响应（非流式）- 仅供内部使用，新的实现在chat.go中
+func (h *ChatHandler) processRegularResponse(c *gin.Context, resp *resty.Response, model string) {
 	c.Header("Content-Type", constants.ContentTypeJSON)
 	c.Header("Access-Control-Allow-Origin", "*")
 

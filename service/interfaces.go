@@ -16,7 +16,7 @@ type ChatService interface {
 
 	// 内部方法
 	chatParamCheck(request models.OpenAIChatCompletionsRequest) error
-	handleRegularResponse(c *gin.Context, resp *resty.Response, model string)
+	handleRegularResponse(c *gin.Context, resp *resty.Response, model string, request models.OpenAIChatCompletionsRequest)
 }
 
 // UserManager 用户管理接口

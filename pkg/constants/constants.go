@@ -57,3 +57,21 @@ const (
 	RetryDelay         = 500 * time.Millisecond
 	RandomStringLength = 10
 )
+
+// 缓存相关常量
+const (
+	// 默认缓存过期时间
+	DefaultModelCacheTTL    = 24 * time.Hour  // 模型列表缓存24小时
+	DefaultResponseCacheTTL = 5 * time.Minute // 响应缓存5分钟
+	DefaultCleanupInterval  = 10 * time.Minute // 每10分钟清理一次过期项
+	
+	// 缓存键前缀
+	ModelCacheKey     = "models"
+	ResponseCachePrefix = "response:"
+	
+	// 缓存配置环境变量
+	EnvCacheEnabled   = "CACHE_ENABLED"
+	EnvModelCacheTTL  = "MODEL_CACHE_TTL"
+	EnvRespCacheTTL   = "RESPONSE_CACHE_TTL"
+	EnvCleanupInterval = "CACHE_CLEANUP_INTERVAL"
+)

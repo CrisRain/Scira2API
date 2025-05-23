@@ -33,6 +33,7 @@ var (
 	ErrInternalServer        = &APIError{Code: http.StatusInternalServerError, Message: "Internal server error", Type: "internal_error"}
 	ErrServiceUnavailable    = &APIError{Code: http.StatusServiceUnavailable, Message: "Service unavailable", Type: "service_unavailable"}
 	ErrStreamingNotSupported = &APIError{Code: http.StatusInternalServerError, Message: "Streaming not supported", Type: "streaming_error"}
+	ErrTooManyRequests       = &APIError{Code: http.StatusTooManyRequests, Message: "Too many requests", Type: "rate_limit_error"}
 )
 
 // 错误创建函数
@@ -67,6 +68,15 @@ func NewServiceUnavailableError(message string, err error) *APIError {
 		Code:    http.StatusServiceUnavailable,
 		Message: message,
 		Type:    "service_unavailable",
+		Err:     err,
+	}
+}
+
+func NewTooManyRequestsError(message string, err error) *APIError {
+	return &APIError{
+		Code:    http.StatusTooManyRequests,
+		Message: message,
+		Type:    "rate_limit_error",
 		Err:     err,
 	}
 }

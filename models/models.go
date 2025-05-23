@@ -101,6 +101,32 @@ type OpenAIChatCompletionsStreamResponse struct {
 	Stream            bool     `json:"stream,omitempty"`
 }
 
+// OpenAI 非流式响应结构体
+type OpenAIChatCompletionsResponse struct {
+	ID                string   `json:"id"`
+	Object            string   `json:"object"`
+	Provider          string   `json:"provider,omitempty"`
+	Model             string   `json:"model"`
+	SystemFingerprint string   `json:"system_fingerprint,omitempty"`
+	Created           int64    `json:"created"`
+	Choices           []ResponseChoice `json:"choices"`
+	Usage             Usage    `json:"usage"`
+}
+
+type ResponseChoice struct {
+	Index               int           `json:"index"`
+	Message             ResponseMessage `json:"message"`
+	FinishReason        string        `json:"finish_reason"`
+	NaturalFinishReason string        `json:"natural_finish_reason,omitempty"`
+	Logprobs            any           `json:"logprobs,omitempty"`
+}
+
+type ResponseMessage struct {
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+}
+
 type Choice struct {
 	Index               int    `json:"index"`
 	Delta               Delta  `json:"delta"`
