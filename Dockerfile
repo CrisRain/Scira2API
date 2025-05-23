@@ -1,5 +1,5 @@
 # 多阶段构建 - 构建阶段
-FROM golang:1.24-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 # 设置Go环境变量
 ENV GO111MODULE=on \

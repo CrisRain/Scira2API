@@ -86,3 +86,5 @@ data.db
 *_test.go
 
 *_debug_bin*
+
+.cursor
