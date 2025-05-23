@@ -41,7 +41,7 @@ RUN echo "=== Module Information ===" && \
     -installsuffix cgo \
     -ldflags="-w -s" \
     -o scira2api \
-    ./...
+    .
 
 # 运行阶段 - 使用更小的基础镜像
 FROM alpine:3.19
