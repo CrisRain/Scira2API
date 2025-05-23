@@ -2,7 +2,6 @@ package service
 
 import (
 	"bufio"
-	"encoding/json"
 	"net/http"
 	"scira2api/log"
 	"scira2api/models"
@@ -113,105 +112,5 @@ func (h *ChatHandler) correctUsage(serverUsage, calculatedUsage models.Usage) mo
 
 // processResponseLine 处理响应行
 func (h *ChatHandler) processResponseLine(line string, content, reasoningContent *string, usage *models.Usage, finishReason *string) {
-	switch {
-	case strings.HasPrefix(line, "0:"):
-		// 内容部分
-		*content += processContent(line[2:])
-
-	case strings.HasPrefix(line, "g:"):
-		// 推理内容
-		*reasoningContent += processContent(line[2:])
-
-	case strings.HasPrefix(line, "e:"):
-		// 完成信息
-		h.processFinishData(line[2:], finishReason)
-
-	case strings.HasPrefix(line, "d:"):
-		// 用量信息
-		h.processUsageData(line[2:], usage)
-	}
-}
-
-// processFinishData 处理完成数据
-func (h *ChatHandler) processFinishData(data string, finishReason *string) {
-	var finishData map[string]interface{}
-	if err := json.Unmarshal([]byte(data), &finishData); err != nil {
-		log.Warn("Failed to parse finish data: %v", err)
-		return
-	}
-
-	if reason, ok := finishData["finishReason"].(string); ok {
-		*finishReason = reason
-	}
-}
-
-// processUsageData 处理用量数据
-func (h *ChatHandler) processUsageData(data string, usage *models.Usage) {
-	var usageData map[string]interface{}
-	if err := json.Unmarshal([]byte(data), &usageData); err != nil {
-		log.Warn("Failed to parse usage data: %v", err)
-		return
-	}
-
-	if u, ok := usageData["usage"].(map[string]interface{}); ok {
-		// 处理提示tokens (prompt_tokens 或 input_tokens)
-		if pt, ok := u["prompt_tokens"].(float64); ok {
-			usage.PromptTokens = int(pt)
-		} else if it, ok := u["input_tokens"].(float64); ok {
-			// 兼容旧字段名
-			usage.PromptTokens = int(it)
-		}
-		
-		// 处理提示tokens详情
-		if ptd, ok := u["prompt_tokens_details"].(map[string]interface{}); ok {
-			if ct, ok := ptd["cached_tokens"].(float64); ok {
-				usage.PromptTokensDetails.CachedTokens = int(ct)
-			}
-			if at, ok := ptd["audio_tokens"].(float64); ok {
-				usage.PromptTokensDetails.AudioTokens = int(at)
-			}
-		} else if itd, ok := u["input_tokens_details"].(map[string]interface{}); ok {
-			// 兼容旧字段名
-			if ct, ok := itd["cached_tokens"].(float64); ok {
-				usage.PromptTokensDetails.CachedTokens = int(ct)
-			}
-		}
-		
-		// 处理完成tokens (completion_tokens 或 output_tokens)
-		if ct, ok := u["completion_tokens"].(float64); ok {
-			usage.CompletionTokens = int(ct)
-		} else if ot, ok := u["output_tokens"].(float64); ok {
-			// 兼容旧字段名
-			usage.CompletionTokens = int(ot)
-		}
-		
-		// 处理完成tokens详情
-		if ctd, ok := u["completion_tokens_details"].(map[string]interface{}); ok {
-			if rt, ok := ctd["reasoning_tokens"].(float64); ok {
-				usage.CompletionTokensDetails.ReasoningTokens = int(rt)
-			}
-			if at, ok := ctd["audio_tokens"].(float64); ok {
-				usage.CompletionTokensDetails.AudioTokens = int(at)
-			}
-			if apt, ok := ctd["accepted_prediction_tokens"].(float64); ok {
-				usage.CompletionTokensDetails.AcceptedPredictionTokens = int(apt)
-			}
-			if rpt, ok := ctd["rejected_prediction_tokens"].(float64); ok {
-				usage.CompletionTokensDetails.RejectedPredictionTokens = int(rpt)
-			}
-		} else if otd, ok := u["output_tokens_details"].(map[string]interface{}); ok {
-			// 兼容旧字段名
-			if rt, ok := otd["reasoning_tokens"].(float64); ok {
-				usage.CompletionTokensDetails.ReasoningTokens = int(rt)
-			}
-		}
-		
-		// 处理总tokens
-		if tt, ok := u["total_tokens"].(float64); ok {
-			usage.TotalTokens = int(tt)
-		} else {
-			// 如果没有提供总数，则计算
-			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-		}
-	}
+processLineData(line, content, reasoningContent, usage, finishReason)
 }

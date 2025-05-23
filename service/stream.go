@@ -293,7 +293,8 @@ func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.
 	} else if strings.HasPrefix(line, "d:") {
 		// 处理用量数据
 		usage := &models.Usage{}
-		h.processUsageData(line[2:], usage)
+		var dummyContent, dummyReasoningContent, dummyFinishReason string
+		processLineData(line, &dummyContent, &dummyReasoningContent, usage, &dummyFinishReason)
 		h.streamUsage = usage // 保存用量数据供后续使用
 	}
 
