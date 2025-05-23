@@ -9,7 +9,7 @@ OPTIMIZATION_SUMMARY.md
 *.md
 
 # 日志文件
-log/
+# log/
 *.log
 
 # 环境配置

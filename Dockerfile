@@ -41,7 +41,7 @@ RUN echo "=== Module Information ===" && \
     -installsuffix cgo \
     -ldflags="-w -s" \
     -o scira2api \
-    .
+    ./...
 
 # 运行阶段 - 使用更小的基础镜像
 FROM alpine:3.19
@@ -70,7 +70,7 @@ WORKDIR /app
 COPY --from=builder --chown=appuser:appgroup /build/scira2api .
 
 # 复制配置文件（如果存在）
-COPY --from=builder --chown=appuser:appgroup /build/.env.example .env.example
+# COPY --from=builder --chown=appuser:appgroup /build/.env.example .env.example
 
 # 切换到非root用户
 USER appuser
