@@ -1,30 +1,30 @@
-# System Design Patterns & Architecture
+# 系统设计模式与架构
 
-This document records the architectural decisions, design patterns, and system-level considerations for the project.
+本文档记录了项目的架构决策、设计模式和系统级考虑因素。
 
-## 1. High-Level Architecture
-*   [Diagram or description of the overall system architecture]
-*   [Key components and their interactions]
+## 1. 高级架构
+*   [整体系统架构的图表或描述]
+*   [关键组件及其交互]
 
-## 2. Design Patterns Used
-*   **Pattern 1: [Pattern Name]**
-    *   **Context/Problem:** [When and why this pattern is used]
-    *   **Solution:** [How the pattern is implemented]
-    *   **Rationale:** [Benefits of using this pattern here]
-*   **Pattern 2: [Pattern Name]**
-    *   **Context/Problem:** [When and why this pattern is used]
-    *   **Solution:** [How the pattern is implemented]
-    *   **Rationale:** [Benefits of using this pattern here]
+## 2. 使用的设计模式
+*   **模式1：[模式名称]**
+    *   **上下文/问题：** [何时以及为什么使用此模式]
+    *   **解决方案：** [如何实现该模式]
+    *   **理由：** [在这里使用此模式的好处]
+*   **模式2：[模式名称]**
+    *   **上下文/问题：** [何时以及为什么使用此模式]
+    *   **解决方案：** [如何实现该模式]
+    *   **理由：** [在这里使用此模式的好处]
 
-## 3. Technology Stack
-*   **Backend:** [e.g., Go, Node.js, Python]
-*   **Frontend:** [e.g., React, Vue, Angular]
-*   **Database:** [e.g., PostgreSQL, MongoDB]
-*   **Infrastructure:** [e.g., Docker, Kubernetes, AWS]
+## 3. 技术栈
+*   **后端：** [例如，Go、Node.js、Python]
+*   **前端：** [例如，React、Vue、Angular]
+*   **数据库：** [例如，PostgreSQL、MongoDB]
+*   **基础设施：** [例如，Docker、Kubernetes、AWS]
 
-## 4. Key System-Level Concerns
-*   **Scalability:** [How the system is designed to scale]
-*   **Reliability:** [Measures for ensuring system uptime and fault tolerance]
-*   **Maintainability:** [Practices for code quality and ease of updates]
+## 4. 关键系统级关注点
+*   **可扩展性：** [系统如何设计以实现扩展]
+*   **可靠性：** [确保系统正常运行时间和容错的措施]
+*   **可维护性：** [代码质量和易于更新的实践]
 
 ---

@@ -1,29 +1,29 @@
-# Product Context
+# 产品上下文
 
-This document outlines the product's goals, target audience, key features, and other relevant contextual information.
+本文档概述了产品的目标、目标受众、主要功能和其他相关上下文信息。
 
-## 1. Product Vision & Goals
-*   [Overall vision for the product]
-*   [Specific, measurable, achievable, relevant, time-bound (SMART) goals]
+## 1. 产品愿景与目标
+*   [产品的总体愿景]
+*   [具体、可衡量、可实现、相关、有时限的(SMART)目标]
 
-## 2. Target Audience
-*   [Describe the primary users and their needs]
+## 2. 目标受众
+*   [描述主要用户及其需求]
 
-## 3. Key Features
-*   **Feature 1:** [Description]
-    *   User Stories:
-        *   As a [user type], I want [action] so that [benefit].
-*   **Feature 2:** [Description]
-    *   User Stories:
-        *   As a [user type], I want [action] so that [benefit].
+## 3. 主要功能
+*   **功能1：** [描述]
+    *   用户故事：
+        *   作为[用户类型]，我想要[行动]以便[收益]。
+*   **功能2：** [描述]
+    *   用户故事：
+        *   作为[用户类型]，我想要[行动]以便[收益]。
 
-## 4. Non-Functional Requirements
-*   **Performance:** [e.g., Response times, scalability]
-*   **Security:** [e.g., Data protection, authentication]
-*   **Usability:** [e.g., Ease of use, accessibility]
+## 4. 非功能性需求
+*   **性能：** [例如，响应时间、可扩展性]
+*   **安全性：** [例如，数据保护、身份验证]
+*   **可用性：** [例如，易用性、可访问性]
 
-## 5. Assumptions & Constraints
-*   [Any assumptions made during planning]
-*   [Any constraints affecting the project (e.g., budget, timeline, technology stack)]
+## 5. 假设与约束
+*   [规划期间做出的任何假设]
+*   [影响项目的任何约束(例如，预算、时间线、技术栈)]
 
 ---

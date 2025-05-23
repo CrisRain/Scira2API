@@ -2,6 +2,7 @@ package service
 
 import (
 	"scira2api/config"
+	"scira2api/models"
 	"scira2api/pkg/constants"
 	"scira2api/pkg/manager"
 
@@ -14,6 +15,7 @@ type ChatHandler struct {
 	client          *resty.Client
 	userManager     *manager.UserManager
 	chatIdGenerator *manager.ChatIdGenerator
+	streamUsage     *models.Usage // 用于存储流式响应的tokens统计信息
 }
 
 // NewChatHandler 创建新的聊天处理器实例

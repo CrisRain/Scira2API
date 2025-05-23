@@ -140,6 +140,9 @@ func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context,
 
 // processResponseStream 处理响应流数据
 func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context, resp *resty.Response, request models.OpenAIChatCompletionsRequest, flusher http.Flusher) error {
+	// 重置统计数据
+	h.streamUsage = nil
+	
 	scanner := bufio.NewScanner(resp.RawBody())
 
 	// 设置更大的缓冲区
@@ -273,6 +276,11 @@ func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.
 
 		// 立即刷新，确保实时传输
 		flusher.Flush()
+	} else if strings.HasPrefix(line, "d:") {
+		// 处理用量数据
+		usage := &models.Usage{}
+		h.processUsageData(line[2:], usage)
+		h.streamUsage = usage // 保存用量数据供后续使用
 	}
 
 	return nil
@@ -295,6 +303,11 @@ func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.F
 		Created: created,
 		Model:   model,
 		Choices: finalChoice,
+	}
+
+	// 添加tokens统计信息（如果有）
+	if h.streamUsage != nil {
+		finalResponse.Usage = *h.streamUsage
 	}
 
 	finalJSON, err := json.Marshal(finalResponse)

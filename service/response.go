@@ -101,12 +101,36 @@ func (h *ChatHandler) processUsageData(data string, usage *models.Usage) {
 	}
 
 	if u, ok := usageData["usage"].(map[string]interface{}); ok {
-		if pt, ok := u["promptTokens"].(float64); ok {
-			usage.PromptTokens = int(pt)
+		// 输入tokens
+		if it, ok := u["input_tokens"].(float64); ok {
+			usage.InputTokens = int(it)
 		}
-		if ct, ok := u["completionTokens"].(float64); ok {
-			usage.CompletionTokens = int(ct)
+		
+		// 输入tokens详情
+		if itd, ok := u["input_tokens_details"].(map[string]interface{}); ok {
+			if ct, ok := itd["cached_tokens"].(float64); ok {
+				usage.InputTokensDetails.CachedTokens = int(ct)
+			}
 		}
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		
+		// 输出tokens
+		if ot, ok := u["output_tokens"].(float64); ok {
+			usage.OutputTokens = int(ot)
+		}
+		
+		// 输出tokens详情
+		if otd, ok := u["output_tokens_details"].(map[string]interface{}); ok {
+			if rt, ok := otd["reasoning_tokens"].(float64); ok {
+				usage.OutputTokensDetails.ReasoningTokens = int(rt)
+			}
+		}
+		
+		// 总tokens
+		if tt, ok := u["total_tokens"].(float64); ok {
+			usage.TotalTokens = int(tt)
+		} else {
+			// 如果没有提供总数，则计算
+			usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+		}
 	}
 }
