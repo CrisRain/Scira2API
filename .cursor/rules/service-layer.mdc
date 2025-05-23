@@ -1,0 +1,53 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# 服务层架构指南
+
+## 服务层概览
+service/ 目录包含所有业务逻辑，按功能模块组织。
+
+## 核心文件结构
+
+### 主要服务文件
+- [service/handler.go](mdc:service/handler.go): HTTP 处理器，包含路由处理函数
+- [service/chat.go](mdc:service/chat.go): 聊天对话核心逻辑
+- [service/stream.go](mdc:service/stream.go): 流式响应处理
+- [service/response.go](mdc:service/response.go): 响应格式化和构造
+- [service/validator.go](mdc:service/validator.go): 请求验证逻辑
+- [service/model.go](mdc:service/model.go): 模型管理
+- [service/utils.go](mdc:service/utils.go): 工具函数
+
+### 接口定义
+- [service/interfaces.go](mdc:service/interfaces.go): 定义服务层接口契约
+
+## 关键服务组件
+
+### ChatHandler
+主要的 HTTP 处理器，负责：
+- 模型列表查询 (`ModelGetHandler`)
+- 聊天完成请求 (`ChatCompletionsHandler`)
+
+### 聊天处理流程
+1. **请求验证**: 验证输入格式和必需字段
+2. **用户管理**: 使用用户 ID 轮询机制
+3. **代理请求**: 转发请求到 Scira API
+4. **响应处理**: 格式化为 OpenAI 兼容格式
+5. **流式处理**: 支持实时流式响应
+
+### 流式响应机制
+- 实现 Server-Sent Events (SSE)
+- 实时转发 Scira API 响应
+- 错误处理和连接管理
+
+## 依赖关系
+- 依赖 [config/](mdc:config) 获取配置
+- 使用 [models/](mdc:models) 中的数据结构
+- 调用 [pkg/](mdc:pkg) 中的公共组件
+
+## 错误处理策略
+- 统一的错误响应格式
+- 请求重试机制
+- 详细的错误日志记录
+

@@ -1,5 +1,12 @@
 package models
 
+import (
+	"scira2api/pkg/constants"
+	"time"
+)
+
+// OpenAI API 相关结构体
+
 type OpenAIModelResponse struct {
 	ID      string `json:"id"`
 	Created int64  `json:"created"`
@@ -25,30 +32,34 @@ type OpenAIChatCompletionsRequest struct {
 	Stream   bool      `json:"stream"`
 }
 
-// 定义结构体
-type MessagePart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
+// Message 消息结构体
 type Message struct {
 	Role    string        `json:"role"`
 	Content string        `json:"content"`
 	Parts   []MessagePart `json:"parts,omitempty"`
 }
 
-func (oai *Message) ToSciraMessage() Message {
+// MessagePart 消息部分结构体
+type MessagePart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// ToSciraMessage 转换为Scira格式的消息
+func (m *Message) ToSciraMessage() Message {
 	return Message{
-		Role:    oai.Role,
-		Content: oai.Content,
+		Role:    m.Role,
+		Content: m.Content,
 		Parts: []MessagePart{
 			{
 				Type: "text",
-				Text: oai.Content,
+				Text: m.Content,
 			},
 		},
 	}
 }
+
+// Scira API 相关结构体
 
 type SciraChatCompletionsRequest struct {
 	ID            string    `json:"id"`
@@ -59,7 +70,8 @@ type SciraChatCompletionsRequest struct {
 	UserId        string    `json:"user_id"`
 }
 
-func (oai *OpenAIChatCompletionsRequest) ToSciraChatCompletionsRequest(model string, chatId string, userId string) *SciraChatCompletionsRequest {
+// ToSciraChatCompletionsRequest 转换为Scira格式的聊天请求
+func (oai *OpenAIChatCompletionsRequest) ToSciraChatCompletionsRequest(model, chatId, userId string) *SciraChatCompletionsRequest {
 	sciraMessages := make([]Message, len(oai.Messages))
 	for i, message := range oai.Messages {
 		sciraMessages[i] = message.ToSciraMessage()
@@ -67,23 +79,25 @@ func (oai *OpenAIChatCompletionsRequest) ToSciraChatCompletionsRequest(model str
 
 	return &SciraChatCompletionsRequest{
 		ID:            chatId,
-		Group:         "chat",
-		TimeZone:      "Asia/Shanghai",
+		Group:         constants.ChatGroup,
+		TimeZone:      constants.DefaultTimeZone,
 		SelectedModel: model,
 		UserId:        userId,
 		Messages:      sciraMessages,
 	}
 }
 
+// OpenAI 流式响应结构体
+
 type OpenAIChatCompletionsStreamResponse struct {
 	ID                string   `json:"id"`
 	Object            string   `json:"object"`
-	Provider          string   `json:"provider"`
+	Provider          string   `json:"provider,omitempty"`
 	Model             string   `json:"model"`
-	SystemFingerprint string   `json:"system_fingerprint"`
+	SystemFingerprint string   `json:"system_fingerprint,omitempty"`
 	Created           int64    `json:"created"`
 	Choices           []Choice `json:"choices"`
-	Usage             Usage    `json:"usage"`
+	Usage             Usage    `json:"usage,omitempty"`
 	Stream            bool     `json:"stream,omitempty"`
 }
 
@@ -91,14 +105,14 @@ type Choice struct {
 	Index               int    `json:"index"`
 	Delta               Delta  `json:"delta"`
 	FinishReason        string `json:"finish_reason"`
-	NaturalFinishReason string `json:"natural_finish_reason"`
+	NaturalFinishReason string `json:"natural_finish_reason,omitempty"`
 	Logprobs            any    `json:"logprobs"`
 }
 
 type Delta struct {
-	Role             string `json:"role"`
-	Content          string `json:"content"`
-	ReasoningContent string `json:"reasoning_content"`
+	Role             string `json:"role,omitempty"`
+	Content          string `json:"content,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type Usage struct {
@@ -107,23 +121,41 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-func NewOaiStreamResponse(id string, time int64, model string, choices []Choice) *OpenAIChatCompletionsStreamResponse {
+// 构建响应的辅助函数
+
+// NewOaiStreamResponse 创建新的OpenAI流式响应
+func NewOaiStreamResponse(id string, timestamp int64, model string, choices []Choice) *OpenAIChatCompletionsStreamResponse {
 	return &OpenAIChatCompletionsStreamResponse{
 		ID:       id,
-		Object:   "chat.completion.chunk",
-		Provider: "scira",
+		Object:   constants.ObjectChatCompletionChunk,
+		Provider: constants.ProviderScira,
 		Model:    model,
-		Created:  time,
+		Created:  timestamp,
 		Choices:  choices,
 	}
 }
 
-func NewChoice(content string, reasoningContent string, finishReason string) []Choice {
+// NewChoice 创建新的选择项
+func NewChoice(content, reasoningContent, finishReason string) []Choice {
 	return []Choice{
 		{
-			Index:        0,
-			Delta:        Delta{Role: "assistant", Content: content, ReasoningContent: reasoningContent},
+			Index: 0,
+			Delta: Delta{
+				Role:             constants.RoleAssistant,
+				Content:          content,
+				ReasoningContent: reasoningContent,
+			},
 			FinishReason: finishReason,
 		},
+	}
+}
+
+// NewModelResponse 创建模型响应
+func NewModelResponse(id string) OpenAIModelResponse {
+	return OpenAIModelResponse{
+		ID:      id,
+		Created: time.Now().Unix(),
+		Object:  "model",
+		OwnedBy: constants.ProviderScira,
 	}
 }

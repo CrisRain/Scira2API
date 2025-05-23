@@ -2,32 +2,30 @@ package middleware
 
 import (
 	"scira2api/config"
+	"scira2api/pkg/errors"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
-func AuthMiddleware(config *config.Config) gin.HandlerFunc {
+// AuthMiddleware 认证中间件
+func AuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		apiKey := config.ApiKey
+		apiKey := cfg.Auth.ApiKey
 		if apiKey != "" {
-			Key := c.GetHeader("Authorization")
-			if Key != "" {
-				Key = strings.TrimPrefix(Key, "Bearer ")
-				if Key != apiKey {
-					c.JSON(401, gin.H{
-						"error": "Invalid API key",
-					})
-					c.Abort()
-					return
-				} else {
-					c.Next()
-					return
-				}
-			} else {
-				c.JSON(401, gin.H{
-					"error": "Missing or invalid Authorization header",
-				})
+			authHeader := c.GetHeader("Authorization")
+			if authHeader == "" {
+				apiErr := errors.NewUnauthorizedError("Missing Authorization header")
+				c.JSON(apiErr.Code, gin.H{"error": apiErr.Message})
+				c.Abort()
+				return
+			}
+
+			// 移除Bearer前缀
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			if token == authHeader || token != apiKey {
+				apiErr := errors.NewUnauthorizedError("Invalid API key")
+				c.JSON(apiErr.Code, gin.H{"error": apiErr.Message})
 				c.Abort()
 				return
 			}

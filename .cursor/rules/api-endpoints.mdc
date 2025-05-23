@@ -1,0 +1,45 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# API 端点指南
+
+## 主要端点
+项目提供两个主要的 OpenAI 兼容 API 端点：
+
+### 1. 获取模型列表
+```
+GET /v1/models
+```
+- **处理器**: `handler.ModelGetHandler` 在 [service/handler.go](mdc:service/handler.go)
+- **功能**: 返回支持的 AI 模型列表
+- **认证**: 需要 Bearer Token
+
+### 2. 聊天完成
+```
+POST /v1/chat/completions
+```
+- **处理器**: `handler.ChatCompletionsHandler` 在 [service/handler.go](mdc:service/handler.go)
+- **功能**: 处理聊天对话请求，支持流式和非流式响应
+- **认证**: 需要 Bearer Token
+
+## 中间件链
+在 [main.go](mdc:main.go) 中配置的中间件链：
+1. **ErrorMiddleware**: 统一错误处理
+2. **AuthMiddleware**: Bearer Token 认证
+3. **CorsMiddleware**: 跨域资源共享支持
+
+## 业务逻辑
+- 聊天处理逻辑在 [service/chat.go](mdc:service/chat.go)
+- 流式响应处理在 [service/stream.go](mdc:service/stream.go)
+- 请求验证在 [service/validator.go](mdc:service/validator.go)
+- 响应格式化在 [service/response.go](mdc:service/response.go)
+
+## 数据模型
+请求和响应的数据结构定义在 [models/models.go](mdc:models/models.go)，包括：
+- ChatRequest / ChatResponse
+- Message 结构
+- Choice 结构
+- Usage 统计
+

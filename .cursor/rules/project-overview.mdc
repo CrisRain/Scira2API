@@ -1,0 +1,46 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Scira2API 项目概览
+
+## 项目简介
+Scira2API 是一个高性能的 Go 语言 API 代理服务，提供与 Scira AI 的聊天交互功能，并提供 OpenAI 兼容的接口。
+
+## 项目架构
+```
+scira2api/
+├── main.go              # 主入口文件
+├── config/              # 配置管理模块
+├── service/             # 业务服务层
+├── models/              # 数据模型定义
+├── middleware/          # 中间件层
+├── pkg/                 # 公共包
+│   ├── errors/          # 错误处理
+│   ├── http/            # HTTP 工具
+│   └── manager/         # 管理器组件
+└── log/                 # 日志系统
+```
+
+## 核心文件
+- [main.go](mdc:main.go) - 应用程序主入口，包含路由配置和服务启动逻辑
+- [go.mod](mdc:go.mod) - Go 模块文件，定义依赖关系
+- [config/config.go](mdc:config/config.go) - 配置管理，支持环境变量配置
+- [service/](mdc:service) - 业务逻辑层，包含聊天处理、模型管理等服务
+- [models/models.go](mdc:models/models.go) - 数据结构定义，包含请求/响应模型
+
+## 技术栈
+- **Web框架**: Gin (高性能HTTP框架)
+- **HTTP客户端**: Resty (用于代理请求)
+- **配置管理**: Godotenv (环境变量加载)
+- **日志**: 自定义日志系统
+- **容器化**: Docker 支持
+
+## 主要功能
+- OpenAI 兼容的 API 接口
+- 实时流式数据传输
+- 智能用户 ID 轮询分配
+- 可配置的请求重试机制
+- 完整的错误处理和日志系统
+
