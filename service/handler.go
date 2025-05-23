@@ -16,6 +16,11 @@ type ChatHandler struct {
 	userManager     *manager.UserManager
 	chatIdGenerator *manager.ChatIdGenerator
 	streamUsage     *models.Usage // 用于存储流式响应的tokens统计信息
+	
+	// 存储自己计算的token数据，用于校正统计结果
+	calculatedInputTokens  int
+	calculatedOutputTokens int
+	calculatedTotalTokens  int
 }
 
 // NewChatHandler 创建新的聊天处理器实例
@@ -71,4 +76,53 @@ func (h *ChatHandler) GetConfig() *config.Config {
 // GetClient 获取HTTP客户端
 func (h *ChatHandler) GetClient() *resty.Client {
 	return h.client
+}
+
+// resetTokenCalculation 重置token计算数据
+func (h *ChatHandler) resetTokenCalculation() {
+	h.calculatedInputTokens = 0
+	h.calculatedOutputTokens = 0
+	h.calculatedTotalTokens = 0
+}
+
+// calculateInputTokens 计算请求的提示tokens
+func (h *ChatHandler) calculateInputTokens(request models.OpenAIChatCompletionsRequest) {
+	// 将消息转换为可计算格式
+	messagesInterface := make([]interface{}, len(request.Messages))
+	for i, msg := range request.Messages {
+		msgMap := map[string]interface{}{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+		messagesInterface[i] = msgMap
+	}
+	
+	// 计算提示tokens
+	h.calculatedInputTokens = calculateMessageTokens(messagesInterface)
+}
+
+// updateOutputTokens 更新完成tokens计算
+func (h *ChatHandler) updateOutputTokens(content string) {
+	tokens := countTokens(content)
+	h.calculatedOutputTokens += tokens
+	h.calculatedTotalTokens = h.calculatedInputTokens + h.calculatedOutputTokens
+}
+
+// getCalculatedUsage 获取计算得到的usage数据
+func (h *ChatHandler) getCalculatedUsage() models.Usage {
+	return models.Usage{
+		PromptTokens:     h.calculatedInputTokens,
+		CompletionTokens: h.calculatedOutputTokens,
+		TotalTokens:      h.calculatedTotalTokens,
+		PromptTokensDetails: models.PromptTokensDetails{
+			CachedTokens: 0,
+			AudioTokens:  0,
+		},
+		CompletionTokensDetails: models.CompletionTokensDetails{
+			ReasoningTokens:         0,
+			AudioTokens:             0,
+			AcceptedPredictionTokens: 0,
+			RejectedPredictionTokens: 0,
+		},
+	}
 }

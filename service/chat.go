@@ -38,6 +38,12 @@ func (h *ChatHandler) ChatCompletionsHandler(c *gin.Context) {
 		c.JSON(apiErr.Code, gin.H{"error": apiErr.Message})
 		return
 	}
+	
+	// 重置token统计
+	h.resetTokenCalculation()
+	
+	// 计算输入tokens
+	h.calculateInputTokens(request)
 
 	if request.Stream {
 		if err := h.doChatRequestAsync(c, request); err != nil {

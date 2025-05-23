@@ -143,6 +143,12 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 	// 重置统计数据
 	h.streamUsage = nil
 	
+	// 重置我们自己的token计算
+	h.resetTokenCalculation()
+	
+	// 计算输入tokens
+	h.calculateInputTokens(request)
+	
 	scanner := bufio.NewScanner(resp.RawBody())
 
 	// 设置更大的缓冲区
@@ -237,8 +243,16 @@ func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.
 
 		if strings.HasPrefix(line, "g:") {
 			reasoningContent = processContent(line[2:])
+			// 更新推理内容的token计数
+			if reasoningContent != "" {
+				h.updateOutputTokens(reasoningContent)
+			}
 		} else if strings.HasPrefix(line, "0:") {
 			content = processContent(line[2:])
+			// 更新内容的token计数
+			if content != "" {
+				h.updateOutputTokens(content)
+			}
 		}
 
 		// 创建OpenAI格式的流式响应
@@ -305,10 +319,25 @@ func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.F
 		Choices: finalChoice,
 	}
 
-	// 添加tokens统计信息（如果有）
+	// 获取我们计算的token统计数据
+	calculatedUsage := h.getCalculatedUsage()
+	
+	// 服务器返回的统计数据
+	var serverUsage models.Usage
 	if h.streamUsage != nil {
-		finalResponse.Usage = *h.streamUsage
+		serverUsage = *h.streamUsage
 	}
+	
+	// 对比和校正token统计
+	correctedUsage := h.correctUsage(serverUsage, calculatedUsage)
+	
+	// 记录原始和校正后的统计数据
+	log.Info("流式Token统计对比 - 服务器: 提示=%d, 完成=%d, 总计=%d | 计算值: 提示=%d, 完成=%d, 总计=%d",
+		serverUsage.PromptTokens, serverUsage.CompletionTokens, serverUsage.TotalTokens,
+		calculatedUsage.PromptTokens, calculatedUsage.CompletionTokens, calculatedUsage.TotalTokens)
+	
+	// 添加校正后的tokens统计信息
+	finalResponse.Usage = correctedUsage
 
 	finalJSON, err := json.Marshal(finalResponse)
 	if err != nil {

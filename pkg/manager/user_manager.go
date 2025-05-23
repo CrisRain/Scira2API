@@ -2,7 +2,6 @@ package manager
 
 import (
 	"math/rand"
-	"sync/atomic"
 	"time"
 )
 
@@ -26,9 +25,15 @@ func NewUserManager(userIds []string) *UserManager {
 
 // GetNextUserId 获取下一个用户ID（轮询方式）
 func (um *UserManager) GetNextUserId() string {
-	userIdsLength := int64(len(um.userIds))
-	newIndex := atomic.AddInt64(&um.index, 1)
-	return um.userIds[newIndex%userIdsLength]
+	// 生成符合 user-0cjy35d3tm26 格式的随机字符串
+	prefix := "user-"
+	const letterBytes = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 10)
+	for i := range b {
+		b[i] = letterBytes[rand.Intn(len(letterBytes))]
+	}
+	randomPart := string(b)
+	return prefix + randomPart
 }
 
 // GetUserCount 获取用户数量
