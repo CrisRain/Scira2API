@@ -25,7 +25,7 @@ Scira2API 是一个基于 Go 语言开发的 API 适配器服务，它提供了�
 1. 克隆仓库
 
 ```bash
-git clone https://github.com/yourusername/scira2api.git
+git clone https://github.com/CrisRain/Scira2API.git
 cd scira2api
 ```
 
