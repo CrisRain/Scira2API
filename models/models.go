@@ -145,24 +145,11 @@ type Delta struct {
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
-type PromptTokensDetails struct {
-	CachedTokens int `json:"cached_tokens"`
-	AudioTokens  int `json:"audio_tokens"`
-}
-
-type CompletionTokensDetails struct {
-	ReasoningTokens         int `json:"reasoning_tokens"`
-	AudioTokens             int `json:"audio_tokens"`
-	AcceptedPredictionTokens int `json:"accepted_prediction_tokens"`
-	RejectedPredictionTokens int `json:"rejected_prediction_tokens"`
-}
-
+// Usage 结构体，仅包含核心token统计字段
 type Usage struct {
-	PromptTokens           int                    `json:"prompt_tokens"`
-	PromptTokensDetails    PromptTokensDetails    `json:"prompt_tokens_details"`
-	CompletionTokens       int                    `json:"completion_tokens"`
-	CompletionTokensDetails CompletionTokensDetails `json:"completion_tokens_details"`
-	TotalTokens            int                    `json:"total_tokens"`
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // 构建响应的辅助函数

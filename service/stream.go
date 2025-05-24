@@ -19,7 +19,7 @@ import (
 )
 
 // doChatRequestAsync 执行异步聊天请求（流式）
-func (h *ChatHandler) doChatRequestAsync(c *gin.Context, request models.OpenAIChatCompletionsRequest) error {
+func (h *ChatHandler) doChatRequestAsync(c *gin.Context, request models.OpenAIChatCompletionsRequest, counter *TokenCounter) error {
 	// 设置SSE响应头
 	h.setSSEHeaders(c)
 
@@ -40,7 +40,7 @@ func (h *ChatHandler) doChatRequestAsync(c *gin.Context, request models.OpenAICh
 	h.startHeartbeat(ctx, c.Writer, flusher, &wg)
 
 	// 执行流式请求
-	err := h.executeStreamRequest(ctx, c, request, flusher)
+	err := h.executeStreamRequest(ctx, c, request, flusher, counter)
 	
 	// 流式响应结束后，立即取消上下文，通知心跳goroutine停止
 	log.Info("流式响应已完成，取消上下文以停止心跳")
@@ -85,7 +85,7 @@ func (h *ChatHandler) startHeartbeat(ctx context.Context, writer gin.ResponseWri
 }
 
 // executeStreamRequest 执行流式请求
-func (h *ChatHandler) executeStreamRequest(ctx context.Context, c *gin.Context, request models.OpenAIChatCompletionsRequest, flusher http.Flusher) error {
+func (h *ChatHandler) executeStreamRequest(ctx context.Context, c *gin.Context, request models.OpenAIChatCompletionsRequest, flusher http.Flusher, counter *TokenCounter) error {
 	attempts := h.getRetryAttempts()
 
 	for i := 0; i < attempts; i++ {
@@ -99,7 +99,7 @@ func (h *ChatHandler) executeStreamRequest(ctx context.Context, c *gin.Context, 
 		userId := h.getUserId()
 		log.Info("Attempt %d/%d: Request use userId: %s, generate chatId: %s", i+1, attempts, userId, chatId)
 
-		if err := h.processStreamResponse(ctx, c, request, chatId, userId, flusher); err == nil {
+		if err := h.processStreamResponse(ctx, c, request, chatId, userId, flusher, counter); err == nil {
 			log.Info("Attempt %d/%d successful. UserId: %s, ChatId: %s", i+1, attempts, userId, chatId)
 			return nil
 		} else {
@@ -131,7 +131,7 @@ func (h *ChatHandler) getRetryAttempts() int {
 }
 
 // processStreamResponse 处理流式响应
-func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context, request models.OpenAIChatCompletionsRequest, chatId, userId string, flusher http.Flusher) error {
+func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context, request models.OpenAIChatCompletionsRequest, chatId, userId string, flusher http.Flusher, counter *TokenCounter) error {
 	sciraRequest := request.ToSciraChatCompletionsRequest(request.Model, chatId, userId)
 
 	// 发送请求
@@ -176,11 +176,11 @@ func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context,
 	}
 
 	// 处理响应流
-	return h.processResponseStream(ctx, c, resp, request, flusher)
+	return h.processResponseStream(ctx, c, resp, request, flusher, counter)
 }
 
 // processResponseStream 处理响应流数据
-func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context, resp *resty.Response, request models.OpenAIChatCompletionsRequest, flusher http.Flusher) (err error) {
+func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context, resp *resty.Response, request models.OpenAIChatCompletionsRequest, flusher http.Flusher, counter *TokenCounter) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("Panic recovered in processResponseStream: %v", r)
@@ -193,16 +193,9 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 		}
 	}()
 
-	// 重置统计数据
-	h.mu.Lock()
-	h.streamUsage = nil
-	h.mu.Unlock()
-	
-	// 重置我们自己的token计算
-	h.resetTokenCalculation()
-	
-	// 计算输入tokens
-	h.calculateInputTokens(request)
+	// 使用传入的token计数器，确保每个请求数据隔离
+	// 计算输入tokens（如果在外层已经计算过，这里会重新计算，确保数据一致）
+	h.calculateInputTokens(request, counter)
 	
 	scanner := bufio.NewScanner(resp.RawBody())
 
@@ -215,7 +208,7 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 	created := time.Now().Unix()
 
 	// 发送初始消息
-	if err := h.sendInitialMessage(c.Writer, flusher, responseID, created, request.Model); err != nil {
+	if err := h.sendInitialMessage(c.Writer, flusher, responseID, created, request.Model, counter); err != nil {
 		return err
 	}
 
@@ -237,7 +230,7 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 			continue
 		}
 
-		if err := h.processStreamLine(c.Writer, flusher, line, responseID, created, request.Model); err != nil {
+		if err := h.processStreamLine(c.Writer, flusher, line, responseID, created, request.Model, counter); err != nil {
 			log.Error("Error processing stream line: %v", err)
 			errCount++
 			
@@ -247,6 +240,9 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 				log.Error(errMsg)
 				
 				// 发送错误消息给客户端
+				// 获取当前的token统计
+				currentUsage := counter.GetUsage()
+				
 				errorResponse := models.OpenAIChatCompletionsStreamResponse{
 					ID:      responseID,
 					Object:  constants.ObjectChatCompletionChunk,
@@ -263,6 +259,7 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 							},
 						},
 					},
+					Usage:   currentUsage, // 添加当前的token统计
 				}
 				
 				errorJSON, jsonErr := json.Marshal(errorResponse)
@@ -288,7 +285,7 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 	// 发送结束消息
 	// 始终尝试发送最终消息，以确保 [DONE] 被发送。
 	// This is crucial for ensuring the client knows the stream has ended, even if there was a scanner error.
-	finalMessageErr := h.sendFinalMessage(c.Writer, flusher, responseID, created, request.Model)
+	finalMessageErr := h.sendFinalMessage(c.Writer, flusher, responseID, created, request.Model, counter)
 
 	if scannerError != nil {
 		if finalMessageErr != nil {
@@ -307,7 +304,7 @@ func (h *ChatHandler) generateResponseID() string {
 }
 
 // sendInitialMessage 发送初始消息
-func (h *ChatHandler) sendInitialMessage(writer gin.ResponseWriter, flusher http.Flusher, responseID string, created int64, model string) error {
+func (h *ChatHandler) sendInitialMessage(writer gin.ResponseWriter, flusher http.Flusher, responseID string, created int64, model string, counter *TokenCounter) error {
 	initialDelta := models.Delta{
 		Role:             constants.RoleAssistant,
 		Content:          "",
@@ -324,12 +321,16 @@ func (h *ChatHandler) sendInitialMessage(writer gin.ResponseWriter, flusher http
 		},
 	}
 
+	// 获取初始的token统计（此时只有输入tokens）
+	initialUsage := counter.GetUsage()
+	
 	initialResponse := models.OpenAIChatCompletionsStreamResponse{
 		ID:      responseID,
 		Object:  constants.ObjectChatCompletionChunk,
 		Created: created,
 		Model:   model,
 		Choices: initialChoice,
+		Usage:   initialUsage, // 添加初始的token统计
 	}
 
 	initialJSON, err := json.Marshal(initialResponse)
@@ -350,7 +351,7 @@ func (h *ChatHandler) sendInitialMessage(writer gin.ResponseWriter, flusher http
 var lastFlushTime time.Time
 const minFlushInterval = 100 * time.Millisecond
 
-func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.Flusher, line, responseID string, created int64, model string) error {
+func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.Flusher, line, responseID string, created int64, model string, counter *TokenCounter) error {
 	// 处理不同类型的数据并转换为OpenAI流式格式
 	if strings.HasPrefix(line, "g:") || strings.HasPrefix(line, "0:") {
 		var content string
@@ -360,13 +361,13 @@ func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.
 			reasoningContent = processContent(line[2:])
 			// 更新推理内容的token计数
 			if reasoningContent != "" {
-				h.updateOutputTokens(reasoningContent)
+				h.updateOutputTokens(reasoningContent, counter)
 			}
 		} else if strings.HasPrefix(line, "0:") {
 			content = processContent(line[2:])
 			// 更新内容的token计数
 			if content != "" {
-				h.updateOutputTokens(content)
+				h.updateOutputTokens(content, counter)
 			}
 		}
 
@@ -386,12 +387,16 @@ func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.
 			},
 		}
 
+		// 获取当前的token统计，并添加到每条响应中
+		currentUsage := counter.GetUsage()
+		
 		response := models.OpenAIChatCompletionsStreamResponse{
 			ID:      responseID,
 			Object:  constants.ObjectChatCompletionChunk,
 			Created: created,
 			Model:   model,
 			Choices: choice,
+			Usage:   currentUsage, // 添加当前的token统计
 		}
 
 		// 转换为JSON
@@ -416,14 +421,14 @@ func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.
 		usage := &models.Usage{}
 		var dummyContent, dummyReasoningContent, dummyFinishReason string
 		processLineData(line, &dummyContent, &dummyReasoningContent, usage, &dummyFinishReason)
-		h.streamUsage = usage // 保存用量数据供后续使用
+		counter.SetStreamUsage(usage) // 保存用量数据供后续使用
 	}
 
 	return nil
 }
 
 // sendFinalMessage 发送结束消息
-func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.Flusher, responseID string, created int64, model string) error {
+func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.Flusher, responseID string, created int64, model string, counter *TokenCounter) error {
 	// 发送带有完成原因的最终消息
 	finalChoice := []models.Choice{
 		{
@@ -444,12 +449,13 @@ func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.F
 	}
 
 	// 获取我们计算的token统计数据
-	calculatedUsage := h.getCalculatedUsage()
+	calculatedUsage := counter.GetUsage()
 	
 	// 服务器返回的统计数据
 	var serverUsage models.Usage
-	if h.streamUsage != nil {
-		serverUsage = *h.streamUsage
+	streamUsage := counter.GetStreamUsage()
+	if streamUsage != nil {
+		serverUsage = *streamUsage
 	}
 	
 	// 对比和校正token统计
@@ -491,6 +497,13 @@ func (h *ChatHandler) sendPanicErrorSSE(writer gin.ResponseWriter, flusher http.
 	errorID := h.generateResponseID()
 	createdTime := time.Now().Unix()
 
+	// 在panic情况下，我们无法获取正确的token统计，创建一个空统计
+	emptyUsage := models.Usage{
+		PromptTokens:     0,
+		CompletionTokens: 0,
+		TotalTokens:      0,
+	}
+	
 	errorResponse := models.OpenAIChatCompletionsStreamResponse{
 		ID:      errorID,
 		Object:  constants.ObjectChatCompletionChunk,
@@ -508,6 +521,7 @@ func (h *ChatHandler) sendPanicErrorSSE(writer gin.ResponseWriter, flusher http.
 				},
 			},
 		},
+		Usage:   emptyUsage, // 添加空统计
 	}
 
 	errorJSON, jsonErr := json.Marshal(errorResponse)

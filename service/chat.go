@@ -62,14 +62,14 @@ func (h *ChatHandler) ChatCompletionsHandler(c *gin.Context) {
 		}
 	}
 	
-	// 重置token统计
-	h.resetTokenCalculation()
+	// 创建新的token计数器，确保每个请求数据隔离
+	tokenCounter := NewTokenCounter()
 	
 	// 计算输入tokens
-	h.calculateInputTokens(request)
+	h.calculateInputTokens(request, tokenCounter)
 
 	if request.Stream {
-		if err := h.doChatRequestAsync(c, request); err != nil {
+		if err := h.doChatRequestAsync(c, request, tokenCounter); err != nil {
 			log.Error("async request failed: %s", err)
 			if !c.Writer.Written() { // 只有在还没开始写响应时才返回错误
 				apiErr := errors.NewInternalServerError("Stream processing failed", err)
@@ -77,16 +77,16 @@ func (h *ChatHandler) ChatCompletionsHandler(c *gin.Context) {
 			}
 		}
 	} else {
-		h.handleSyncRequest(c, request)
+		h.handleSyncRequest(c, request, tokenCounter)
 	}
 }
 
 // handleSyncRequest 处理同步请求
-func (h *ChatHandler) handleSyncRequest(c *gin.Context, request models.OpenAIChatCompletionsRequest) {
+func (h *ChatHandler) handleSyncRequest(c *gin.Context, request models.OpenAIChatCompletionsRequest, counter *TokenCounter) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.config.Client.Timeout)
 	defer cancel()
 
-	resultChan := h.doChatRequestRegular(ctx, request)
+	resultChan := h.doChatRequestRegular(ctx, request, counter)
 
 	select {
 	case result := <-resultChan:
@@ -97,7 +97,7 @@ func (h *ChatHandler) handleSyncRequest(c *gin.Context, request models.OpenAICha
 			c.JSON(apiErr.Code, gin.H{"error": apiErr.Message})
 			return
 		}
-		h.handleRegularResponse(c, resp, request.Model, request)
+		h.handleRegularResponse(c, resp, request.Model, request, counter)
 
 	case <-ctx.Done():
 		log.Error("request timeout")
@@ -107,7 +107,7 @@ func (h *ChatHandler) handleSyncRequest(c *gin.Context, request models.OpenAICha
 }
 
 // doChatRequestRegular 执行常规聊天请求（非流式）
-func (h *ChatHandler) doChatRequestRegular(ctx context.Context, request models.OpenAIChatCompletionsRequest) <-chan chatRequestResult {
+func (h *ChatHandler) doChatRequestRegular(ctx context.Context, request models.OpenAIChatCompletionsRequest, _ *TokenCounter) <-chan chatRequestResult {
 	resultChan := make(chan chatRequestResult, constants.ChannelBufferSize)
 
 	go func() {
@@ -167,7 +167,7 @@ func (h *ChatHandler) executeRequestWithRetry(ctx context.Context, request model
 }
 
 // handleRegularResponse 重写处理常规响应
-func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response, model string, request models.OpenAIChatCompletionsRequest) {
+func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response, model string, request models.OpenAIChatCompletionsRequest, counter *TokenCounter) {
 	// 调用原始的处理方法处理基本响应
 	c.Header("Content-Type", constants.ContentTypeJSON)
 	c.Header("Access-Control-Allow-Origin", "*")
@@ -202,13 +202,13 @@ func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response
 	}
 	
 	// 使用我们自己的方法计算输出tokens
-	h.updateOutputTokens(content)
+	h.updateOutputTokens(content, counter)
 	if len(reasoningContent) > 0 {
-		h.updateOutputTokens(reasoningContent)
+		h.updateOutputTokens(reasoningContent, counter)
 	}
 	
 	// 获取我们计算的tokens统计
-	calculatedUsage := h.getCalculatedUsage()
+	calculatedUsage := counter.GetUsage()
 	
 	// 将我们计算的tokens与服务器返回的进行对比和校正
 	correctedUsage := h.correctUsage(usage, calculatedUsage)

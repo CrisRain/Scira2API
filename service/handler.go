@@ -10,7 +10,6 @@ import (
 	"scira2api/pkg/constants"
 	"scira2api/pkg/manager"
 	"scira2api/pkg/ratelimit"
-	"sync"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -22,13 +21,6 @@ type ChatHandler struct {
 	client          *resty.Client
 	userManager     *manager.UserManager
 	chatIdGenerator *manager.ChatIdGenerator
-	mu              sync.Mutex             // 互斥锁，保护共享字段的并发访问
-	streamUsage     *models.Usage          // 用于存储流式响应的tokens统计信息
-	
-	// 存储自己计算的token数据，用于校正统计结果
-	calculatedInputTokens  int
-	calculatedOutputTokens int
-	calculatedTotalTokens  int
 	
 	// 性能优化组件
 	responseCache  *cache.ResponseCache    // 响应缓存
@@ -154,17 +146,8 @@ func (h *ChatHandler) GetClient() *resty.Client {
 	return h.client
 }
 
-// resetTokenCalculation 重置token计算数据
-func (h *ChatHandler) resetTokenCalculation() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.calculatedInputTokens = 0
-	h.calculatedOutputTokens = 0
-	h.calculatedTotalTokens = 0
-}
-
 // calculateInputTokens 计算请求的提示tokens
-func (h *ChatHandler) calculateInputTokens(request models.OpenAIChatCompletionsRequest) {
+func (h *ChatHandler) calculateInputTokens(request models.OpenAIChatCompletionsRequest, counter *TokenCounter) {
 	// 将消息转换为可计算格式
 	messagesInterface := make([]interface{}, len(request.Messages))
 	for i, msg := range request.Messages {
@@ -175,42 +158,51 @@ func (h *ChatHandler) calculateInputTokens(request models.OpenAIChatCompletionsR
 		messagesInterface[i] = msgMap
 	}
 	
-	// 计算提示tokens，加锁保护
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.calculatedInputTokens = calculateMessageTokens(messagesInterface)
+	// 计算提示tokens
+	inputTokens := calculateMessageTokens(messagesInterface)
+	counter.SetInputTokens(inputTokens)
 }
 
 // updateOutputTokens 更新完成tokens计算
-func (h *ChatHandler) updateOutputTokens(content string) {
+func (h *ChatHandler) updateOutputTokens(content string, counter *TokenCounter) {
 	tokens := countTokens(content)
-	
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.calculatedOutputTokens += tokens
-	h.calculatedTotalTokens = h.calculatedInputTokens + h.calculatedOutputTokens
+	counter.AddOutputTokens(tokens)
 }
 
-// getCalculatedUsage 获取计算得到的usage数据
-func (h *ChatHandler) getCalculatedUsage() models.Usage {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+// correctUsage 校正用量统计数据
+func (h *ChatHandler) correctUsage(serverUsage, calculatedUsage models.Usage) models.Usage {
+	// 创建校正后的用量数据
+	correctedUsage := serverUsage
 	
-	return models.Usage{
-		PromptTokens:     h.calculatedInputTokens,
-		CompletionTokens: h.calculatedOutputTokens,
-		TotalTokens:      h.calculatedTotalTokens,
-		PromptTokensDetails: models.PromptTokensDetails{
-			CachedTokens: 0,
-			AudioTokens:  0,
-		},
-		CompletionTokensDetails: models.CompletionTokensDetails{
-			ReasoningTokens:         0,
-			AudioTokens:             0,
-			AcceptedPredictionTokens: 0,
-			RejectedPredictionTokens: 0,
-		},
+	// 提示tokens校正：如果计算值与服务器返回值相差超过20%，使用计算值
+	if serverUsage.PromptTokens > 0 && calculatedUsage.PromptTokens > 0 {
+		diff := float64(serverUsage.PromptTokens - calculatedUsage.PromptTokens) / float64(calculatedUsage.PromptTokens)
+		if diff > 0.2 || diff < -0.2 {
+			log.Warn("提示tokens统计偏差超过20%%，使用计算值：服务器=%d, 计算值=%d",
+				serverUsage.PromptTokens, calculatedUsage.PromptTokens)
+			correctedUsage.PromptTokens = calculatedUsage.PromptTokens
+		}
+	} else if serverUsage.PromptTokens == 0 && calculatedUsage.PromptTokens > 0 {
+		// 如果服务器没有返回提示tokens，使用计算值
+		correctedUsage.PromptTokens = calculatedUsage.PromptTokens
 	}
+	
+	// 完成tokens校正：类似逻辑
+	if serverUsage.CompletionTokens > 0 && calculatedUsage.CompletionTokens > 0 {
+		diff := float64(serverUsage.CompletionTokens - calculatedUsage.CompletionTokens) / float64(calculatedUsage.CompletionTokens)
+		if diff > 0.2 || diff < -0.2 {
+			log.Warn("完成tokens统计偏差超过20%%，使用计算值：服务器=%d, 计算值=%d",
+				serverUsage.CompletionTokens, calculatedUsage.CompletionTokens)
+			correctedUsage.CompletionTokens = calculatedUsage.CompletionTokens
+		}
+	} else if serverUsage.CompletionTokens == 0 && calculatedUsage.CompletionTokens > 0 {
+		correctedUsage.CompletionTokens = calculatedUsage.CompletionTokens
+	}
+	
+	// 重新计算总tokens
+	correctedUsage.TotalTokens = correctedUsage.PromptTokens + correctedUsage.CompletionTokens
+	
+	return correctedUsage
 }
 
 // GetCacheMetrics 获取缓存指标

@@ -180,7 +180,7 @@ func processLineData(line string, content, reasoningContent *string, usage *mode
 		}
 
 	case strings.HasPrefix(line, "d:"):
-		// 用量信息，使用预定义结构体提高解析效率
+		// 用量信息，使用简化结构体，只处理核心字段
 		var usageData struct {
 			Usage struct {
 				PromptTokens     float64 `json:"prompt_tokens"`
@@ -188,26 +188,6 @@ func processLineData(line string, content, reasoningContent *string, usage *mode
 				CompletionTokens float64 `json:"completion_tokens"`
 				OutputTokens     float64 `json:"output_tokens"` // 兼容旧字段名
 				TotalTokens      float64 `json:"total_tokens"`
-				
-				PromptTokensDetails struct {
-					CachedTokens float64 `json:"cached_tokens"`
-					AudioTokens  float64 `json:"audio_tokens"`
-				} `json:"prompt_tokens_details"`
-				
-				InputTokensDetails struct { // 兼容旧字段名
-					CachedTokens float64 `json:"cached_tokens"`
-				} `json:"input_tokens_details"`
-				
-				CompletionTokensDetails struct {
-					ReasoningTokens         float64 `json:"reasoning_tokens"`
-					AudioTokens             float64 `json:"audio_tokens"`
-					AcceptedPredictionTokens float64 `json:"accepted_prediction_tokens"`
-					RejectedPredictionTokens float64 `json:"rejected_prediction_tokens"`
-				} `json:"completion_tokens_details"`
-				
-				OutputTokensDetails struct { // 兼容旧字段名
-					ReasoningTokens float64 `json:"reasoning_tokens"`
-				} `json:"output_tokens_details"`
 			} `json:"usage"`
 		}
 		
@@ -224,44 +204,12 @@ func processLineData(line string, content, reasoningContent *string, usage *mode
 			usage.PromptTokens = int(usageData.Usage.InputTokens)
 		}
 		
-		// 处理提示tokens详情
-		if usageData.Usage.PromptTokensDetails.CachedTokens > 0 {
-			usage.PromptTokensDetails.CachedTokens = int(usageData.Usage.PromptTokensDetails.CachedTokens)
-		}
-		if usageData.Usage.PromptTokensDetails.AudioTokens > 0 {
-			usage.PromptTokensDetails.AudioTokens = int(usageData.Usage.PromptTokensDetails.AudioTokens)
-		}
-		
-		// 兼容旧字段名
-		if usageData.Usage.InputTokensDetails.CachedTokens > 0 {
-			usage.PromptTokensDetails.CachedTokens = int(usageData.Usage.InputTokensDetails.CachedTokens)
-		}
-		
 		// 处理完成tokens (completion_tokens 或 output_tokens)
 		if usageData.Usage.CompletionTokens > 0 {
 			usage.CompletionTokens = int(usageData.Usage.CompletionTokens)
 		} else if usageData.Usage.OutputTokens > 0 {
 			// 兼容旧字段名
 			usage.CompletionTokens = int(usageData.Usage.OutputTokens)
-		}
-		
-		// 处理完成tokens详情
-		if usageData.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
-			usage.CompletionTokensDetails.ReasoningTokens = int(usageData.Usage.CompletionTokensDetails.ReasoningTokens)
-		}
-		if usageData.Usage.CompletionTokensDetails.AudioTokens > 0 {
-			usage.CompletionTokensDetails.AudioTokens = int(usageData.Usage.CompletionTokensDetails.AudioTokens)
-		}
-		if usageData.Usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 {
-			usage.CompletionTokensDetails.AcceptedPredictionTokens = int(usageData.Usage.CompletionTokensDetails.AcceptedPredictionTokens)
-		}
-		if usageData.Usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
-			usage.CompletionTokensDetails.RejectedPredictionTokens = int(usageData.Usage.CompletionTokensDetails.RejectedPredictionTokens)
-		}
-		
-		// 兼容旧字段名
-		if usageData.Usage.OutputTokensDetails.ReasoningTokens > 0 {
-			usage.CompletionTokensDetails.ReasoningTokens = int(usageData.Usage.OutputTokensDetails.ReasoningTokens)
 		}
 		
 		// 处理总tokens
