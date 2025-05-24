@@ -30,7 +30,8 @@ func (h *ChatHandler) doChatRequestAsync(c *gin.Context, request models.OpenAICh
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.config.Client.Timeout)
-	defer cancel()
+	// 不使用defer cancel()，而是在流式响应结束后手动取消上下文
+	// 这样可以确保心跳goroutine在流式响应结束后立即停止
 
 	// 使用WaitGroup来跟踪goroutine
 	var wg sync.WaitGroup
@@ -40,6 +41,10 @@ func (h *ChatHandler) doChatRequestAsync(c *gin.Context, request models.OpenAICh
 
 	// 执行流式请求
 	err := h.executeStreamRequest(ctx, c, request, flusher)
+	
+	// 流式响应结束后，立即取消上下文，通知心跳goroutine停止
+	log.Info("流式响应已完成，取消上下文以停止心跳")
+	cancel()
 	
 	// 等待心跳goroutine完成
 	wg.Wait()
