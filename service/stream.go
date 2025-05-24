@@ -265,12 +265,22 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scanner error: %w", err)
-	}
+	scannerError := scanner.Err()
 
 	// 发送结束消息
-	return h.sendFinalMessage(c.Writer, flusher, responseID, created, request.Model)
+	// 始终尝试发送最终消息，以确保 [DONE] 被发送。
+	// This is crucial for ensuring the client knows the stream has ended, even if there was a scanner error.
+	finalMessageErr := h.sendFinalMessage(c.Writer, flusher, responseID, created, request.Model)
+
+	if scannerError != nil {
+		if finalMessageErr != nil {
+			// 如果发送最终消息也失败了，记录下来，但优先返回 scannerError。
+			log.Error("Error sending final message after scanner error (%v): %v", scannerError, finalMessageErr)
+		}
+		return fmt.Errorf("scanner error: %w", scannerError)
+	}
+
+	return finalMessageErr // 返回发送最终消息的错误（如果有）。
 }
 
 // generateResponseID 生成OpenAI格式的响应ID
