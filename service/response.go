@@ -41,4 +41,3 @@ func (h *ChatHandler) correctUsage(serverUsage, calculatedUsage models.Usage) mo
 	return correctedUsage
 }
 
-// processResponseLine 已移除，直接使用 processLineData 函数
