@@ -175,7 +175,19 @@ func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context,
 }
 
 // processResponseStream 处理响应流数据
-func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context, resp *resty.Response, request models.OpenAIChatCompletionsRequest, flusher http.Flusher) error {
+func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context, resp *resty.Response, request models.OpenAIChatCompletionsRequest, flusher http.Flusher) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("Panic recovered in processResponseStream: %v", r)
+			// Ensure an error is returned from the function
+			err = fmt.Errorf("panic occurred: %v", r)
+
+			// Send SSE error message and [DONE]
+			errorMsgContent := fmt.Sprintf("Internal Server Error during stream processing. Details: %v", r)
+			h.sendPanicErrorSSE(c.Writer, flusher, request.Model, errorMsgContent)
+		}
+	}()
+
 	// 重置统计数据
 	h.mu.Lock()
 	h.streamUsage = nil
@@ -462,4 +474,54 @@ func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.F
 	log.Info("Stream completed. Final message and [DONE] sent to client.")
 	flusher.Flush()
 	return nil
+}
+
+// sendPanicErrorSSE sends a standardized SSE error message in case of a panic.
+func (h *ChatHandler) sendPanicErrorSSE(writer gin.ResponseWriter, flusher http.Flusher, model string, panicDetails string) {
+	log.Info("Attempting to send panic error SSE to client.")
+
+	// Generate a new ID and timestamp for this panic event
+	errorID := h.generateResponseID()
+	createdTime := time.Now().Unix()
+
+	errorResponse := models.OpenAIChatCompletionsStreamResponse{
+		ID:      errorID,
+		Object:  constants.ObjectChatCompletionChunk,
+		Created: createdTime,
+		Model:   model, // Model is passed from the main function context
+		Choices: []models.Choice{
+			{
+				BaseChoice: models.BaseChoice{
+					Index:        0,
+					FinishReason: "error", // Clearly indicate an error
+				},
+				Delta: models.Delta{
+					// Provide a clear error message in the content
+					Content: fmt.Sprintf("\n\n[PANIC: %s]", panicDetails),
+				},
+			},
+		},
+	}
+
+	errorJSON, jsonErr := json.Marshal(errorResponse)
+	if jsonErr != nil {
+		log.Error("Failed to marshal panic SSE error response: %v. Sending plain text fallback.", jsonErr)
+		// Fallback to plain text if JSON marshalling fails. Escape quotes in panicDetails for JSON-like structure.
+		escapedDetails := strings.ReplaceAll(panicDetails, "\"", "'")
+		escapedDetails = strings.ReplaceAll(escapedDetails, "\n", " ") // Newlines can break SSE
+		if _, writeErr := fmt.Fprintf(writer, "event: error\ndata: {\"error\": \"Internal Server Error\", \"details\": \"%s\"}\n\n", escapedDetails); writeErr != nil {
+			log.Error("Failed to write plain text panic SSE error: %v", writeErr)
+		}
+	} else {
+		if _, writeErr := fmt.Fprintf(writer, "data: %s\n\n", errorJSON); writeErr != nil {
+			log.Error("Failed to write JSON panic SSE error: %v", writeErr)
+		}
+	}
+
+	if _, writeErr := fmt.Fprint(writer, "data: [DONE]\n\n"); writeErr != nil {
+		log.Error("Failed to write [DONE] after panic SSE error: %v", writeErr)
+	}
+
+	flusher.Flush()
+	log.Info("Panic error SSE and [DONE] message sent to client.")
 }
