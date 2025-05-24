@@ -263,10 +263,8 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 				errorJSON, jsonErr := json.Marshal(errorResponse)
 				if jsonErr == nil {
 					fmt.Fprintf(c.Writer, "data: %s\n\n", errorJSON)
-					// 分步发送 [DONE] 信号，避免换行符被错误地插入到字符串中间
-					fmt.Fprint(c.Writer, "data: ")
-					fmt.Fprint(c.Writer, "[DONE]")
-					fmt.Fprint(c.Writer, "\n\n")
+					// 一次性发送完整的 [DONE] 信号，避免换行符被错误地插入到字符串中间
+					fmt.Fprint(c.Writer, "data: [DONE]\n\n")
 					flusher.Flush()
 				}
 				
@@ -470,14 +468,8 @@ func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.F
 	}
 
 	// 发送完成标记
-	// 分步发送 [DONE] 信号，避免换行符被错误地插入到字符串中间
-	if _, err := fmt.Fprint(writer, "data: "); err != nil {
-		return fmt.Errorf("error writing [DONE] prefix to stream: %w", err)
-	}
-	if _, err := fmt.Fprint(writer, "[DONE]"); err != nil {
-		return fmt.Errorf("error writing [DONE] marker to stream: %w", err)
-	}
-	if _, err := fmt.Fprint(writer, "\n\n"); err != nil {
+	// 一次性发送完整的 [DONE] 信号，避免换行符被错误地插入到字符串中间
+	if _, err := fmt.Fprint(writer, "data: [DONE]\n\n"); err != nil {
 		return fmt.Errorf("error writing [DONE] to stream: %w", err)
 	}
 
@@ -528,14 +520,8 @@ func (h *ChatHandler) sendPanicErrorSSE(writer gin.ResponseWriter, flusher http.
 		}
 	}
 
-	// 分步发送 [DONE] 信号，避免换行符被错误地插入到字符串中间
-	if _, writeErr := fmt.Fprint(writer, "data: "); writeErr != nil {
-		log.Error("Failed to write data prefix after panic SSE error: %v", writeErr)
-	}
-	if _, writeErr := fmt.Fprint(writer, "[DONE]"); writeErr != nil {
-		log.Error("Failed to write [DONE] marker after panic SSE error: %v", writeErr)
-	}
-	if _, writeErr := fmt.Fprint(writer, "\n\n"); writeErr != nil {
+	// 一次性发送完整的 [DONE] 信号，避免换行符被错误地插入到字符串中间
+	if _, writeErr := fmt.Fprint(writer, "data: [DONE]\n\n"); writeErr != nil {
 		log.Error("Failed to write [DONE] after panic SSE error: %v", writeErr)
 	}
 
