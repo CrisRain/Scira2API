@@ -67,7 +67,7 @@ type SciraChatCompletionsRequest struct {
 	Messages      []Message `json:"messages"`
 	SelectedModel string    `json:"model"`
 	TimeZone      string    `json:"timezone"`
-	UserId        string    `json:"user_id"`
+	UserID        string    `json:"user_id"`
 }
 
 // ToSciraChatCompletionsRequest 转换为Scira格式的聊天请求
@@ -82,7 +82,7 @@ func (oai *OpenAIChatCompletionsRequest) ToSciraChatCompletionsRequest(model, ch
 		Group:         constants.ChatGroup,
 		TimeZone:      constants.DefaultTimeZone,
 		SelectedModel: model,
-		UserId:        userId,
+		UserID:        userId,
 		Messages:      sciraMessages,
 	}
 }
@@ -113,12 +113,18 @@ type OpenAIChatCompletionsResponse struct {
 	Usage             Usage    `json:"usage"`
 }
 
+// BaseChoice 基础选择结构体，包含共同字段
+type BaseChoice struct {
+	Index               int    `json:"index"`
+	FinishReason        string `json:"finish_reason"`
+	NaturalFinishReason string `json:"natural_finish_reason,omitempty"`
+	Logprobs            any    `json:"logprobs,omitempty"`
+}
+
+// ResponseChoice 非流式响应的选择结构体
 type ResponseChoice struct {
-	Index               int           `json:"index"`
-	Message             ResponseMessage `json:"message"`
-	FinishReason        string        `json:"finish_reason"`
-	NaturalFinishReason string        `json:"natural_finish_reason,omitempty"`
-	Logprobs            any           `json:"logprobs,omitempty"`
+	BaseChoice
+	Message ResponseMessage `json:"message"`
 }
 
 type ResponseMessage struct {
@@ -127,12 +133,10 @@ type ResponseMessage struct {
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
+// Choice 流式响应的选择结构体
 type Choice struct {
-	Index               int    `json:"index"`
-	Delta               Delta  `json:"delta"`
-	FinishReason        string `json:"finish_reason"`
-	NaturalFinishReason string `json:"natural_finish_reason,omitempty"`
-	Logprobs            any    `json:"logprobs"`
+	BaseChoice
+	Delta Delta `json:"delta"`
 }
 
 type Delta struct {
@@ -179,13 +183,15 @@ func NewOaiStreamResponse(id string, timestamp int64, model string, choices []Ch
 func NewChoice(content, reasoningContent, finishReason string) []Choice {
 	return []Choice{
 		{
-			Index: 0,
+			BaseChoice: BaseChoice{
+				Index:        0,
+				FinishReason: finishReason,
+			},
 			Delta: Delta{
 				Role:             constants.RoleAssistant,
 				Content:          content,
 				ReasoningContent: reasoningContent,
 			},
-			FinishReason: finishReason,
 		},
 	}
 }

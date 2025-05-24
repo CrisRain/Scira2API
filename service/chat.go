@@ -192,7 +192,7 @@ func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response
 			continue
 		}
 
-		h.processResponseLine(line, &content, &reasoningContent, &usage, &finishReason)
+		processLineData(line, &content, &reasoningContent, &usage, &finishReason)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -229,13 +229,15 @@ func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response
 		Model:   model,
 		Choices: []models.ResponseChoice{
 			{
-				Index: 0,
+				BaseChoice: models.BaseChoice{
+					Index:        0,
+					FinishReason: finishReason,
+				},
 				Message: models.ResponseMessage{
 					Role:             constants.RoleAssistant,
 					Content:          content,
 					ReasoningContent: reasoningContent,
 				},
-				FinishReason: finishReason,
 			},
 		},
 		Usage: correctedUsage,

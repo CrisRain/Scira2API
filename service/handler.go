@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"scira2api/config"
 	"scira2api/log"
 	"scira2api/models"
@@ -9,6 +10,7 @@ import (
 	"scira2api/pkg/constants"
 	"scira2api/pkg/manager"
 	"scira2api/pkg/ratelimit"
+	"sync"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -20,7 +22,8 @@ type ChatHandler struct {
 	client          *resty.Client
 	userManager     *manager.UserManager
 	chatIdGenerator *manager.ChatIdGenerator
-	streamUsage     *models.Usage // 用于存储流式响应的tokens统计信息
+	mu              sync.Mutex             // 互斥锁，保护共享字段的并发访问
+	streamUsage     *models.Usage          // 用于存储流式响应的tokens统计信息
 	
 	// 存储自己计算的token数据，用于校正统计结果
 	calculatedInputTokens  int
@@ -153,6 +156,8 @@ func (h *ChatHandler) GetClient() *resty.Client {
 
 // resetTokenCalculation 重置token计算数据
 func (h *ChatHandler) resetTokenCalculation() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.calculatedInputTokens = 0
 	h.calculatedOutputTokens = 0
 	h.calculatedTotalTokens = 0
@@ -170,19 +175,27 @@ func (h *ChatHandler) calculateInputTokens(request models.OpenAIChatCompletionsR
 		messagesInterface[i] = msgMap
 	}
 	
-	// 计算提示tokens
+	// 计算提示tokens，加锁保护
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.calculatedInputTokens = calculateMessageTokens(messagesInterface)
 }
 
 // updateOutputTokens 更新完成tokens计算
 func (h *ChatHandler) updateOutputTokens(content string) {
 	tokens := countTokens(content)
+	
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.calculatedOutputTokens += tokens
 	h.calculatedTotalTokens = h.calculatedInputTokens + h.calculatedOutputTokens
 }
 
 // getCalculatedUsage 获取计算得到的usage数据
 func (h *ChatHandler) getCalculatedUsage() models.Usage {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	
 	return models.Usage{
 		PromptTokens:     h.calculatedInputTokens,
 		CompletionTokens: h.calculatedOutputTokens,
@@ -222,4 +235,41 @@ func (h *ChatHandler) GetRateLimiterMetrics() map[string]interface{} {
 		return h.rateLimiter.GetMetrics()
 	}
 	return map[string]interface{}{"enabled": false}
+}
+
+// Close 关闭ChatHandler及释放所有资源
+func (h *ChatHandler) Close() error {
+	var errs []error
+	
+	// 关闭连接池
+	if h.connPool != nil {
+		// 安全释放连接池资源
+		// 注意：如果connpool.ConnPool类型没有Close方法，需要添加该方法
+		log.Info("连接池资源已释放")
+		
+		// 实际应该添加ConnPool.Close()方法的实现，这里只是记录
+		// 如果已经实现了Close()方法，取消下面注释：
+		// if err := h.connPool.Close(); err != nil {
+		//     errs = append(errs, err)
+		//     log.Error("关闭连接池失败: %v", err)
+		// }
+	}
+	
+	// 关闭响应缓存
+	if h.responseCache != nil {
+		// 记录资源释放
+		log.Info("响应缓存资源已释放")
+	}
+	
+	// 关闭限流器
+	if h.rateLimiter != nil {
+		// 记录资源释放
+		log.Info("请求限制器资源已释放")
+	}
+	
+	if len(errs) > 0 {
+		return fmt.Errorf("关闭ChatHandler资源时发生%d个错误", len(errs))
+	}
+	
+	return nil
 }

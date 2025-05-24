@@ -16,8 +16,7 @@ func AuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 			authHeader := c.GetHeader("Authorization")
 			if authHeader == "" {
 				apiErr := errors.NewUnauthorizedError("Missing Authorization header")
-				c.JSON(apiErr.Code, gin.H{"error": apiErr.Message})
-				c.Abort()
+				SendAPIError(c, apiErr)
 				return
 			}
 
@@ -25,8 +24,7 @@ func AuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 			if token == authHeader || token != apiKey {
 				apiErr := errors.NewUnauthorizedError("Invalid API key")
-				c.JSON(apiErr.Code, gin.H{"error": apiErr.Message})
-				c.Abort()
+				SendAPIError(c, apiErr)
 				return
 			}
 		}

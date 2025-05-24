@@ -13,21 +13,10 @@ func ErrorMiddleware() gin.HandlerFunc {
 	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
 		if apiErr, ok := recovered.(*errors.APIError); ok {
 			log.Error("API error: %v", apiErr)
-			c.JSON(apiErr.Code, gin.H{
-				"error": gin.H{
-					"type":    apiErr.Type,
-					"message": apiErr.Message,
-				},
-			})
+			SendAPIError(c, apiErr)
 		} else {
 			log.Error("Unexpected error: %v", recovered)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": gin.H{
-					"type":    "internal_error",
-					"message": "Internal server error",
-				},
-			})
+			SendErrorResponse(c, http.StatusInternalServerError, "internal_error", "Internal server error")
 		}
-		c.Abort()
 	})
 }

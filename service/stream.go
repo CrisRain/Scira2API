@@ -11,6 +11,7 @@ import (
 	"scira2api/pkg/constants"
 	"scira2api/pkg/errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -31,11 +32,19 @@ func (h *ChatHandler) doChatRequestAsync(c *gin.Context, request models.OpenAICh
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.config.Client.Timeout)
 	defer cancel()
 
+	// 使用WaitGroup来跟踪goroutine
+	var wg sync.WaitGroup
+
 	// 启动心跳机制
-	h.startHeartbeat(ctx, c.Writer, flusher)
+	h.startHeartbeat(ctx, c.Writer, flusher, &wg)
 
 	// 执行流式请求
-	return h.executeStreamRequest(ctx, c, request, flusher)
+	err := h.executeStreamRequest(ctx, c, request, flusher)
+	
+	// 等待心跳goroutine完成
+	wg.Wait()
+	
+	return err
 }
 
 // setSSEHeaders 设置服务器发送事件的响应头
@@ -47,8 +56,11 @@ func (h *ChatHandler) setSSEHeaders(c *gin.Context) {
 }
 
 // startHeartbeat 启动心跳机制
-func (h *ChatHandler) startHeartbeat(ctx context.Context, writer gin.ResponseWriter, flusher http.Flusher) {
+func (h *ChatHandler) startHeartbeat(ctx context.Context, writer gin.ResponseWriter, flusher http.Flusher, wg *sync.WaitGroup) {
+	wg.Add(1)
 	go func() {
+		defer wg.Done() // 确保goroutine结束时通知WaitGroup
+		
 		ticker := time.NewTicker(constants.HeartbeatInterval)
 		defer ticker.Stop()
 
@@ -126,12 +138,36 @@ func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context,
 		Execute("POST", constants.APISearchEndpoint)
 
 	if err != nil {
-		return fmt.Errorf("HTTP request failed: %w", err)
+		return fmt.Errorf("HTTP request failed: %w, URL: %s, Method: POST", err, constants.APISearchEndpoint)
 	}
-	defer resp.RawBody().Close()
+	
+	// 确保响应体被关闭
+	if resp != nil && resp.RawBody() != nil {
+		defer func() {
+			if closeErr := resp.RawBody().Close(); closeErr != nil {
+				log.Error("关闭响应体失败: %v", closeErr)
+			}
+		}()
+	} else {
+		log.Warn("HTTP请求成功但响应体为空")
+		return fmt.Errorf("HTTP请求成功但响应体为空")
+	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("HTTP error: %d", resp.StatusCode())
+		// 获取响应体内容
+		responseBody := "无法读取响应体"
+		if len(resp.Body()) > 0 {
+			// 如果响应体内容过长，只显示前1024个字符
+			maxLength := 1024
+			if len(resp.Body()) > maxLength {
+				responseBody = string(resp.Body()[:maxLength]) + "...(截断)"
+			} else {
+				responseBody = string(resp.Body())
+			}
+		}
+		
+		return fmt.Errorf("HTTP错误: 状态码=%d, 响应体=%s, URL=%s, Method=POST",
+			resp.StatusCode(), responseBody, constants.APISearchEndpoint)
 	}
 
 	// 处理响应流
@@ -141,7 +177,9 @@ func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context,
 // processResponseStream 处理响应流数据
 func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context, resp *resty.Response, request models.OpenAIChatCompletionsRequest, flusher http.Flusher) error {
 	// 重置统计数据
+	h.mu.Lock()
 	h.streamUsage = nil
+	h.mu.Unlock()
 	
 	// 重置我们自己的token计算
 	h.resetTokenCalculation()
@@ -164,6 +202,10 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 		return err
 	}
 
+	// 错误计数和阈值
+	errCount := 0
+	const maxErrors = 5 // 最大允许的连续错误数
+	
 	// 处理流式数据
 	for scanner.Scan() {
 		select {
@@ -180,7 +222,46 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 
 		if err := h.processStreamLine(c.Writer, flusher, line, responseID, created, request.Model); err != nil {
 			log.Error("Error processing stream line: %v", err)
-			continue // 继续处理下一行，不中断整个流
+			errCount++
+			
+			// 如果连续错误超过阈值，向客户端发送错误通知并中断处理
+			if errCount >= maxErrors {
+				errMsg := fmt.Sprintf("Too many errors processing stream (reached threshold of %d). Last error: %v", maxErrors, err)
+				log.Error(errMsg)
+				
+				// 发送错误消息给客户端
+				errorResponse := models.OpenAIChatCompletionsStreamResponse{
+					ID:      responseID,
+					Object:  constants.ObjectChatCompletionChunk,
+					Created: created,
+					Model:   request.Model,
+					Choices: []models.Choice{
+						{
+							BaseChoice: models.BaseChoice{
+								Index:        0,
+								FinishReason: "error",
+							},
+							Delta: models.Delta{
+								Content: "\n\n[Stream Error: " + errMsg + "]",
+							},
+						},
+					},
+				}
+				
+				errorJSON, jsonErr := json.Marshal(errorResponse)
+				if jsonErr == nil {
+					fmt.Fprintf(c.Writer, "data: %s\n\n", errorJSON)
+					fmt.Fprint(c.Writer, "data: [DONE]\n\n")
+					flusher.Flush()
+				}
+				
+				return fmt.Errorf("%s", errMsg)
+			}
+			
+			continue // 继续处理下一行，如果错误计数未超过阈值
+		} else {
+			// 成功处理一行后重置错误计数
+			errCount = 0
 		}
 	}
 
@@ -207,9 +288,11 @@ func (h *ChatHandler) sendInitialMessage(writer gin.ResponseWriter, flusher http
 
 	initialChoice := []models.Choice{
 		{
-			Index:        0,
-			Delta:        initialDelta,
-			FinishReason: "",
+			BaseChoice: models.BaseChoice{
+				Index:        0,
+				FinishReason: "",
+			},
+			Delta: initialDelta,
 		},
 	}
 
@@ -235,6 +318,10 @@ func (h *ChatHandler) sendInitialMessage(writer gin.ResponseWriter, flusher http
 }
 
 // processStreamLine 处理流式数据行
+// 添加变量跟踪上次flush时间
+var lastFlushTime time.Time
+const minFlushInterval = 100 * time.Millisecond
+
 func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.Flusher, line, responseID string, created int64, model string) error {
 	// 处理不同类型的数据并转换为OpenAI流式格式
 	if strings.HasPrefix(line, "g:") || strings.HasPrefix(line, "0:") {
@@ -263,9 +350,11 @@ func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.
 
 		choice := []models.Choice{
 			{
-				Index:        0,
-				Delta:        delta,
-				FinishReason: "",
+				BaseChoice: models.BaseChoice{
+					Index:        0,
+					FinishReason: "",
+				},
+				Delta: delta,
 			},
 		}
 
@@ -288,8 +377,12 @@ func (h *ChatHandler) processStreamLine(writer gin.ResponseWriter, flusher http.
 			return fmt.Errorf("error writing to stream: %w", err)
 		}
 
-		// 立即刷新，确保实时传输
-		flusher.Flush()
+		// 控制刷新频率，避免过于频繁的flush
+		now := time.Now()
+		if now.Sub(lastFlushTime) > minFlushInterval {
+			flusher.Flush()
+			lastFlushTime = now
+		}
 	} else if strings.HasPrefix(line, "d:") {
 		// 处理用量数据
 		usage := &models.Usage{}
@@ -306,9 +399,11 @@ func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.F
 	// 发送带有完成原因的最终消息
 	finalChoice := []models.Choice{
 		{
-			Index:        0,
-			Delta:        models.Delta{},
-			FinishReason: "stop",
+			BaseChoice: models.BaseChoice{
+				Index:        0,
+				FinishReason: "stop",
+			},
+			Delta: models.Delta{},
 		},
 	}
 

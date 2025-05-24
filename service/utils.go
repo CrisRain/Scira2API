@@ -1,14 +1,13 @@
 package service
 
 import (
-	"math/rand"
+	"crypto/rand"
 	"strings"
 	"strconv"
 	"unicode/utf8"
 	"encoding/json"
 	"scira2api/log"
 	"scira2api/models"
-	// "log" // 可选: 用于调试 Unquote 失败
 )
 
 // processContent 处理内容，移除引号并处理转义
@@ -59,49 +58,71 @@ func processContent(s string) string {
 	return processedS
 }
 
-// randString 生成随机字符串
+// randString 生成安全的随机字符串
 func randString(n int) string {
 	const letterBytes = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
-	for i := range b {
-		b[i] = letterBytes[rand.Intn(len(letterBytes))]
+	
+	// 使用crypto/rand生成随机字节
+	randomBytes := make([]byte, n)
+	_, err := rand.Read(randomBytes)
+	if err != nil {
+		// 如果随机生成失败，记录错误并返回固定字符串
+		log.Error("Failed to generate random string: %v", err)
+		return "randomfallback"
 	}
+	
+	// 将随机字节映射到字母表
+	for i, randomByte := range randomBytes {
+		b[i] = letterBytes[randomByte%byte(len(letterBytes))]
+	}
+	
 	return string(b)
 }
 
 // countTokens 计算文本中的token数量(近似值)
-// 这是一个简化版计算，实际LLM的token计算会更复杂
+// 这是一个优化版计算，使用单次遍历
 func countTokens(text string) int {
-	// 基本的英文单词和标点符号统计
-	words := strings.Fields(text)
-	wordCount := len(words)
-	
-	// 标点符号和特殊字符统计
-	punctuationCount := 0
-	for _, r := range text {
-		if strings.ContainsRune(".,;:!?()[]{}-_=+*/\\\"'`~@#$%^&<>|", r) {
-			punctuationCount++
-		}
-	}
-	
-	// 中文、日文、韩文等字符统计
-	cjkCount := 0
-	for _, r := range text {
-		if utf8.RuneLen(r) > 1 { // 多字节字符
-			cjkCount++
-		}
-	}
-	
-	// 粗略估计：每个英文单词约1.3个token，标点符号1个token，CJK字符约1.5个token
-	// 这些系数可以根据实际模型的tokenizer进行调整
-	tokenEstimate := int(float64(wordCount) * 1.3) + punctuationCount + int(float64(cjkCount) * 1.5)
-	
-	// 确保至少返回1个token
-	if tokenEstimate < 1 && len(strings.TrimSpace(text)) > 0 {
-		tokenEstimate = 1
-	}
-	
-	return tokenEstimate
+    words := 0
+    punctuation := 0
+    cjk := 0
+    
+    // 单词状态跟踪
+    inWord := false
+    
+    // 单次遍历
+    for _, r := range text {
+        if strings.ContainsRune(" \t\n\r\f\v", r) { // 空白字符
+            if inWord {
+                words++
+                inWord = false
+            }
+        } else if strings.ContainsRune(".,;:!?()[]{}-_=+*/\\\"'`~@#$%^&<>|", r) {
+            punctuation++
+            inWord = false
+        } else {
+            if utf8.RuneLen(r) > 1 { // 多字节字符（CJK等）
+                cjk++
+            } else {
+                inWord = true
+            }
+        }
+    }
+    
+    // 确保最后一个单词被计数
+    if inWord {
+        words++
+    }
+    
+    // 粗略估计：每个英文单词约1.3个token，标点符号1个token，CJK字符约1.5个token
+    tokenEstimate := int(float64(words) * 1.3) + punctuation + int(float64(cjk) * 1.5)
+    
+    // 确保至少返回1个token
+    if tokenEstimate < 1 && len(strings.TrimSpace(text)) > 0 {
+        tokenEstimate = 1
+    }
+    
+    return tokenEstimate
 }
 
 // calculateMessageTokens 计算消息的token数量
@@ -159,72 +180,96 @@ func processLineData(line string, content, reasoningContent *string, usage *mode
 		}
 
 	case strings.HasPrefix(line, "d:"):
-		// 用量信息，只更新最新的用量数据
-		var usageData map[string]interface{}
+		// 用量信息，使用预定义结构体提高解析效率
+		var usageData struct {
+			Usage struct {
+				PromptTokens     float64 `json:"prompt_tokens"`
+				InputTokens      float64 `json:"input_tokens"` // 兼容旧字段名
+				CompletionTokens float64 `json:"completion_tokens"`
+				OutputTokens     float64 `json:"output_tokens"` // 兼容旧字段名
+				TotalTokens      float64 `json:"total_tokens"`
+				
+				PromptTokensDetails struct {
+					CachedTokens float64 `json:"cached_tokens"`
+					AudioTokens  float64 `json:"audio_tokens"`
+				} `json:"prompt_tokens_details"`
+				
+				InputTokensDetails struct { // 兼容旧字段名
+					CachedTokens float64 `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
+				
+				CompletionTokensDetails struct {
+					ReasoningTokens         float64 `json:"reasoning_tokens"`
+					AudioTokens             float64 `json:"audio_tokens"`
+					AcceptedPredictionTokens float64 `json:"accepted_prediction_tokens"`
+					RejectedPredictionTokens float64 `json:"rejected_prediction_tokens"`
+				} `json:"completion_tokens_details"`
+				
+				OutputTokensDetails struct { // 兼容旧字段名
+					ReasoningTokens float64 `json:"reasoning_tokens"`
+				} `json:"output_tokens_details"`
+			} `json:"usage"`
+		}
+		
 		if err := json.Unmarshal([]byte(line[2:]), &usageData); err != nil {
 			log.Warn("Failed to parse usage data: %v", err)
 			return
 		}
-		if u, ok := usageData["usage"].(map[string]interface{}); ok {
-			// 处理提示tokens (prompt_tokens 或 input_tokens)
-			if pt, ok := u["prompt_tokens"].(float64); ok {
-				usage.PromptTokens = int(pt)
-			} else if it, ok := u["input_tokens"].(float64); ok {
-				// 兼容旧字段名
-				usage.PromptTokens = int(it)
-			}
-			
-			// 处理提示tokens详情
-			if ptd, ok := u["prompt_tokens_details"].(map[string]interface{}); ok {
-				if ct, ok := ptd["cached_tokens"].(float64); ok {
-					usage.PromptTokensDetails.CachedTokens = int(ct)
-				}
-				if at, ok := ptd["audio_tokens"].(float64); ok {
-					usage.PromptTokensDetails.AudioTokens = int(at)
-				}
-			} else if itd, ok := u["input_tokens_details"].(map[string]interface{}); ok {
-				// 兼容旧字段名
-				if ct, ok := itd["cached_tokens"].(float64); ok {
-					usage.PromptTokensDetails.CachedTokens = int(ct)
-				}
-			}
-			
-			// 处理完成tokens (completion_tokens 或 output_tokens)
-			if ct, ok := u["completion_tokens"].(float64); ok {
-				usage.CompletionTokens = int(ct)
-			} else if ot, ok := u["output_tokens"].(float64); ok {
-				// 兼容旧字段名
-				usage.CompletionTokens = int(ot)
-			}
-			
-			// 处理完成tokens详情
-			if ctd, ok := u["completion_tokens_details"].(map[string]interface{}); ok {
-				if rt, ok := ctd["reasoning_tokens"].(float64); ok {
-					usage.CompletionTokensDetails.ReasoningTokens = int(rt)
-				}
-				if at, ok := ctd["audio_tokens"].(float64); ok {
-					usage.CompletionTokensDetails.AudioTokens = int(at)
-				}
-				if apt, ok := ctd["accepted_prediction_tokens"].(float64); ok {
-					usage.CompletionTokensDetails.AcceptedPredictionTokens = int(apt)
-				}
-				if rpt, ok := ctd["rejected_prediction_tokens"].(float64); ok {
-					usage.CompletionTokensDetails.RejectedPredictionTokens = int(rpt)
-				}
-			} else if otd, ok := u["output_tokens_details"].(map[string]interface{}); ok {
-				// 兼容旧字段名
-				if rt, ok := otd["reasoning_tokens"].(float64); ok {
-					usage.CompletionTokensDetails.ReasoningTokens = int(rt)
-				}
-			}
-			
-			// 处理总tokens
-			if tt, ok := u["total_tokens"].(float64); ok {
-				usage.TotalTokens = int(tt)
-			} else {
-				// 如果没有提供总数，则计算
-				usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-			}
+		
+		// 处理提示tokens (prompt_tokens 或 input_tokens)
+		if usageData.Usage.PromptTokens > 0 {
+			usage.PromptTokens = int(usageData.Usage.PromptTokens)
+		} else if usageData.Usage.InputTokens > 0 {
+			// 兼容旧字段名
+			usage.PromptTokens = int(usageData.Usage.InputTokens)
+		}
+		
+		// 处理提示tokens详情
+		if usageData.Usage.PromptTokensDetails.CachedTokens > 0 {
+			usage.PromptTokensDetails.CachedTokens = int(usageData.Usage.PromptTokensDetails.CachedTokens)
+		}
+		if usageData.Usage.PromptTokensDetails.AudioTokens > 0 {
+			usage.PromptTokensDetails.AudioTokens = int(usageData.Usage.PromptTokensDetails.AudioTokens)
+		}
+		
+		// 兼容旧字段名
+		if usageData.Usage.InputTokensDetails.CachedTokens > 0 {
+			usage.PromptTokensDetails.CachedTokens = int(usageData.Usage.InputTokensDetails.CachedTokens)
+		}
+		
+		// 处理完成tokens (completion_tokens 或 output_tokens)
+		if usageData.Usage.CompletionTokens > 0 {
+			usage.CompletionTokens = int(usageData.Usage.CompletionTokens)
+		} else if usageData.Usage.OutputTokens > 0 {
+			// 兼容旧字段名
+			usage.CompletionTokens = int(usageData.Usage.OutputTokens)
+		}
+		
+		// 处理完成tokens详情
+		if usageData.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
+			usage.CompletionTokensDetails.ReasoningTokens = int(usageData.Usage.CompletionTokensDetails.ReasoningTokens)
+		}
+		if usageData.Usage.CompletionTokensDetails.AudioTokens > 0 {
+			usage.CompletionTokensDetails.AudioTokens = int(usageData.Usage.CompletionTokensDetails.AudioTokens)
+		}
+		if usageData.Usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 {
+			usage.CompletionTokensDetails.AcceptedPredictionTokens = int(usageData.Usage.CompletionTokensDetails.AcceptedPredictionTokens)
+		}
+		if usageData.Usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
+			usage.CompletionTokensDetails.RejectedPredictionTokens = int(usageData.Usage.CompletionTokensDetails.RejectedPredictionTokens)
+		}
+		
+		// 兼容旧字段名
+		if usageData.Usage.OutputTokensDetails.ReasoningTokens > 0 {
+			usage.CompletionTokensDetails.ReasoningTokens = int(usageData.Usage.OutputTokensDetails.ReasoningTokens)
+		}
+		
+		// 处理总tokens
+		if usageData.Usage.TotalTokens > 0 {
+			usage.TotalTokens = int(usageData.Usage.TotalTokens)
+		} else {
+			// 如果没有提供总数，则计算
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 		}
 	}
 }
