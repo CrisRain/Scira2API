@@ -132,7 +132,9 @@ func (h *ChatHandler) getRetryAttempts() int {
 
 // processStreamResponse 处理流式响应
 func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context, request models.OpenAIChatCompletionsRequest, chatId, userId string, flusher http.Flusher, counter *TokenCounter) error {
-	sciraRequest := request.ToSciraChatCompletionsRequest(request.Model, chatId, userId)
+	// 将外部模型名称映射为内部模型名称
+	internalModel := MapModelName(request.Model)
+	sciraRequest := request.ToSciraChatCompletionsRequest(internalModel, chatId, userId)
 
 	// 发送请求
 	resp, err := h.client.R().
@@ -189,7 +191,7 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 
 			// Send SSE error message and [DONE]
 			errorMsgContent := fmt.Sprintf("Internal Server Error during stream processing. Details: %v", r)
-			h.sendPanicErrorSSE(c.Writer, flusher, request.Model, errorMsgContent)
+			h.sendPanicErrorSSE(c.Writer, flusher, GetExternalModelName(request.Model), errorMsgContent)
 		}
 	}()
 
@@ -207,8 +209,11 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 	responseID := h.generateResponseID()
 	created := time.Now().Unix()
 
+	// 保持外部模型名称在响应中
+	externalModel := request.Model
+	
 	// 发送初始消息
-	if err := h.sendInitialMessage(c.Writer, flusher, responseID, created, request.Model, counter); err != nil {
+	if err := h.sendInitialMessage(c.Writer, flusher, responseID, created, externalModel, counter); err != nil {
 		return err
 	}
 
@@ -230,7 +235,7 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 			continue
 		}
 
-		if err := h.processStreamLine(c.Writer, flusher, line, responseID, created, request.Model, counter); err != nil {
+		if err := h.processStreamLine(c.Writer, flusher, line, responseID, created, externalModel, counter); err != nil {
 			log.Error("Error processing stream line: %v", err)
 			errCount++
 			
@@ -247,7 +252,7 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 					ID:      responseID,
 					Object:  constants.ObjectChatCompletionChunk,
 					Created: created,
-					Model:   request.Model,
+					Model:   externalModel,
 					Choices: []models.Choice{
 						{
 							BaseChoice: models.BaseChoice{
@@ -285,7 +290,7 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 	// 发送结束消息
 	// 始终尝试发送最终消息，以确保 [DONE] 被发送。
 	// This is crucial for ensuring the client knows the stream has ended, even if there was a scanner error.
-	finalMessageErr := h.sendFinalMessage(c.Writer, flusher, responseID, created, request.Model, counter)
+	finalMessageErr := h.sendFinalMessage(c.Writer, flusher, responseID, created, externalModel, counter)
 
 	if scannerError != nil {
 		if finalMessageErr != nil {
@@ -491,6 +496,8 @@ func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.F
 
 // sendPanicErrorSSE sends a standardized SSE error message in case of a panic.
 func (h *ChatHandler) sendPanicErrorSSE(writer gin.ResponseWriter, flusher http.Flusher, model string, panicDetails string) {
+	// 确保使用外部模型名称
+	externalModel := GetExternalModelName(model)
 	log.Info("Attempting to send panic error SSE to client.")
 
 	// Generate a new ID and timestamp for this panic event
@@ -508,7 +515,7 @@ func (h *ChatHandler) sendPanicErrorSSE(writer gin.ResponseWriter, flusher http.
 		ID:      errorID,
 		Object:  constants.ObjectChatCompletionChunk,
 		Created: createdTime,
-		Model:   model, // Model is passed from the main function context
+		Model:   externalModel, // Model is passed from the main function context
 		Choices: []models.Choice{
 			{
 				BaseChoice: models.BaseChoice{

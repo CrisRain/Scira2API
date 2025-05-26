@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"scira2api/config"
 	"scira2api/log"
 	"scira2api/models"
 	"scira2api/pkg/constants"
@@ -168,6 +169,14 @@ func (h *ChatHandler) executeRequestWithRetry(ctx context.Context, request model
 
 // handleRegularResponse 重写处理常规响应
 func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response, model string, request models.OpenAIChatCompletionsRequest, counter *TokenCounter) {
+	// 确保响应中使用的是外部模型名称
+	externalModel := model
+	if _, exists := config.ModelMapping[model]; exists {
+		// 如果传入的是外部模型名，直接使用
+	} else {
+		// 如果传入的是内部模型名，尝试转换为外部模型名
+		externalModel = GetExternalModelName(model)
+	}
 	// 调用原始的处理方法处理基本响应
 	c.Header("Content-Type", constants.ContentTypeJSON)
 	c.Header("Access-Control-Allow-Origin", "*")
@@ -226,7 +235,7 @@ func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response
 		ID:      responseID,
 		Object:  constants.ObjectChatCompletion,
 		Created: time.Now().Unix(),
-		Model:   model,
+		Model:   externalModel,
 		Choices: []models.ResponseChoice{
 			{
 				BaseChoice: models.BaseChoice{
@@ -255,7 +264,9 @@ func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response
 
 // executeRequest 执行单次请求
 func (h *ChatHandler) executeRequest(ctx context.Context, request models.OpenAIChatCompletionsRequest, chatId, userId string) (*resty.Response, error) {
-	sciraRequest := request.ToSciraChatCompletionsRequest(request.Model, chatId, userId)
+	// 将外部模型名称映射为内部模型名称
+	internalModel := MapModelName(request.Model)
+	sciraRequest := request.ToSciraChatCompletionsRequest(internalModel, chatId, userId)
 
 	resp, err := h.client.R().
 		SetContext(ctx).

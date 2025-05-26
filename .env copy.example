@@ -15,3 +15,8 @@ RETRY=3
 
 # Optional, Whether to delete chat history on the page. Default: false (do not delete).
 CHAT_DELETE=true
+
+# Optional, Model name mapping. Format: external_model_name:internal_model_name, separated by commas for multiple mappings.
+# This allows mapping external/public model names to standardized internal model names.
+# Examples: 
+# MODEL_MAPPING=claude-3.7-sonnet-thinking:scira-anthropic,gpt-4o:scira-4o,grok-3:scira-grok-3,gemini-2.5-flash-preview-05-26:scira-google

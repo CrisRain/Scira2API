@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 	"encoding/json"
+	"scira2api/config"
 	"scira2api/log"
 	"scira2api/models"
 )
@@ -220,4 +221,26 @@ func processLineData(line string, content, reasoningContent *string, usage *mode
 			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 		}
 	}
+}
+
+// MapModelName 将外部模型名称映射为内部模型名称
+func MapModelName(externalName string) string {
+	if internalName, exists := config.ModelMapping[externalName]; exists {
+		log.Debug("映射模型名称: %s -> %s", externalName, internalName)
+		return internalName
+	}
+	log.Debug("未找到模型映射: %s，使用原名", externalName)
+	return externalName // 如果没有映射，则返回原始名称
+}
+
+// GetExternalModelName 将内部模型名称映射回外部模型名称
+func GetExternalModelName(internalName string) string {
+	for externalName, mappedName := range config.ModelMapping {
+		if mappedName == internalName {
+			log.Debug("反向映射模型名称: %s -> %s", internalName, externalName)
+			return externalName
+		}
+	}
+	log.Debug("未找到反向模型映射: %s，使用原名", internalName)
+	return internalName // 如果没有映射，则返回原始名称
 }

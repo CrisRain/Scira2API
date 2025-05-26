@@ -28,7 +28,9 @@ func (h *ChatHandler) ModelGetHandler(c *gin.Context) {
 	data := make([]models.OpenAIModelResponse, 0, len(h.config.AvailableModels.Available))
 
 	for _, modelID := range h.config.AvailableModels.Available {
-		model := models.NewModelResponse(modelID)
+		// 检查是否需要转换为外部模型名称
+		externalModelID := GetExternalModelName(modelID)
+		model := models.NewModelResponse(externalModelID)
 		data = append(data, model)
 	}
 	

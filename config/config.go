@@ -281,7 +281,7 @@ func (c *Config) loadRateLimitConfig() error {
 	c.RateLimit.Enabled = rateLimitEnabled
 	
 	// 每秒请求数
-	requestsPerSecondStr := getEnvWithDefault("REQUESTS_PER_SECOND", "10")
+	requestsPerSecondStr := getEnvWithDefault("REQUESTS_PER_SECOND", "1")
 	requestsPerSecond, err := strconv.ParseFloat(requestsPerSecondStr, 64)
 	if err != nil {
 		return fmt.Errorf("invalid REQUESTS_PER_SECOND: %s, error: %v", requestsPerSecondStr, err)
@@ -289,7 +289,7 @@ func (c *Config) loadRateLimitConfig() error {
 	c.RateLimit.RequestsPerSecond = requestsPerSecond
 	
 	// 突发请求数
-	c.RateLimit.Burst = getEnvAsInt("BURST", 20)
+	c.RateLimit.Burst = getEnvAsInt("BURST", 10)
 	
 	return nil
 }
