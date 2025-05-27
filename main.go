@@ -1,14 +1,16 @@
 package main
 
 import (
-	"scira2api/config"
-	"scira2api/log"
-	"scira2api/middleware"
-	"scira2api/service"
-
+	"io"
 	"net/http"
 	"runtime"
 	"time"
+
+	"scira2api/config"
+	"scira2api/log"
+	"scira2api/middleware"
+	"scira2api/proxy"
+	"scira2api/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -77,6 +79,67 @@ func main() {
 		v1.GET("/models", handler.ModelGetHandler)
 		v1.POST("/chat/completions", handler.ChatCompletionsHandler)
 	}
+	
+	// 添加代理测试路由
+	router.GET("/proxy/test", func(c *gin.Context) {
+		// 创建一个代理管理器实例，30分钟刷新一次
+		proxyManager := proxy.NewManager(30 * time.Minute)
+		
+		// 获取一个代理
+		proxyAddr, err := proxyManager.GetProxy()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status":  "error",
+				"message": "获取代理失败: " + err.Error(),
+			})
+			return
+		}
+		
+		// 使用代理请求 https://ip.gs/ 以验证
+		client := http.Client{
+			Timeout: 10 * time.Second,
+		}
+		
+		// 创建请求
+		req, err := http.NewRequest("GET", "https://ip.gs/", nil)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status":  "error",
+				"message": "创建请求失败: " + err.Error(),
+			})
+			return
+		}
+		
+		// 发送请求并获取响应
+		resp, err := client.Do(req)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status":  "error",
+				"message": "请求失败: " + err.Error(),
+				"proxy":   proxyAddr,
+			})
+			return
+		}
+		defer resp.Body.Close()
+		
+		// 读取响应体
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status":  "error",
+				"message": "读取响应失败: " + err.Error(),
+				"proxy":   proxyAddr,
+			})
+			return
+		}
+		
+		// 返回结果
+		c.JSON(http.StatusOK, gin.H{
+			"status":    "success",
+			"proxy":     proxyAddr,
+			"remote_ip": string(body),
+		})
+	})
 
 	log.Info("Server is running on port %s", cfg.Server.Port)
 

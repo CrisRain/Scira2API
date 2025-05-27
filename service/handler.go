@@ -10,6 +10,8 @@ import (
 	"scira2api/pkg/constants"
 	"scira2api/pkg/manager"
 	"scira2api/pkg/ratelimit"
+	"scira2api/proxy"
+	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -21,6 +23,7 @@ type ChatHandler struct {
 	client          *resty.Client
 	userManager     *manager.UserManager
 	chatIdGenerator *manager.ChatIdGenerator
+	proxyManager    *proxy.Manager         // SOCKS5代理管理器
 	
 	// 性能优化组件
 	responseCache  *cache.ResponseCache    // 响应缓存
@@ -49,8 +52,15 @@ func NewChatHandler(cfg *config.Config) *ChatHandler {
 		log.Info("连接池已禁用，使用默认HTTP客户端配置")
 	}
 	
+	// 初始化代理管理器（如果启用动态代理）
+	var proxyManager *proxy.Manager
+	if cfg.Client.DynamicProxy {
+		proxyManager = proxy.NewManager(cfg.Client.ProxyRefreshMin)
+		log.Info("动态SOCKS5代理已启用，刷新间隔: %v", cfg.Client.ProxyRefreshMin)
+	}
+	
 	// 创建统一的resty HTTP客户端
-	client := createHTTPClient(cfg)
+	client := createHTTPClient(cfg, proxyManager)
 	
 	// 如果启用了连接池，配置客户端
 	if cfg.ConnPool.Enabled {
@@ -97,6 +107,7 @@ func NewChatHandler(cfg *config.Config) *ChatHandler {
 		client:          client,
 		userManager:     userManager,
 		chatIdGenerator: chatIdGenerator,
+		proxyManager:    proxyManager,
 		responseCache:   responseCache,
 		connPool:        connPool,
 		rateLimiter:     rateLimiter,
@@ -104,7 +115,7 @@ func NewChatHandler(cfg *config.Config) *ChatHandler {
 }
 
 // createHTTPClient 创建HTTP客户端
-func createHTTPClient(cfg *config.Config) *resty.Client {
+func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *resty.Client {
 	client := resty.New().
 		SetTimeout(cfg.Client.Timeout).
 		SetBaseURL(cfg.Client.BaseURL).
@@ -118,8 +129,37 @@ func createHTTPClient(cfg *config.Config) *resty.Client {
 	client.SetRetryWaitTime(constants.RetryDelay)
 	client.SetRetryMaxWaitTime(constants.RetryDelay * 5)
 
-	// 设置代理（如果有）
-	if cfg.Client.HttpProxy != "" {
+	// 代理配置优先级：动态SOCKS5代理 > 静态SOCKS5代理 > 静态HTTP代理
+	if cfg.Client.DynamicProxy && proxyManager != nil {
+		// 为每个请求设置前置处理器，动态获取代理
+		client.OnBeforeRequest(func(c *resty.Client, req *resty.Request) error {
+			proxyAddr, err := proxyManager.GetProxy()
+			if err != nil {
+				log.Warn("无法获取动态SOCKS5代理，将直接连接: %v", err)
+				c.SetProxy("") // 清除之前可能设置的代理
+				return nil // 继续请求，但不使用代理
+			}
+			
+			// 确保代理地址有正确的协议前缀
+			if !strings.HasPrefix(proxyAddr, "socks5://") {
+				proxyAddr = "socks5://" + proxyAddr
+			}
+			
+			log.Info("对请求 %s 使用动态SOCKS5代理: %s", req.URL, proxyAddr)
+			c.SetProxy(proxyAddr)
+			return nil
+		})
+	} else if cfg.Client.Socks5Proxy != "" {
+		// 使用静态SOCKS5代理
+		proxyAddr := cfg.Client.Socks5Proxy
+		if !strings.HasPrefix(proxyAddr, "socks5://") {
+			proxyAddr = "socks5://" + proxyAddr
+		}
+		log.Info("使用静态SOCKS5代理: %s", proxyAddr)
+		client.SetProxy(proxyAddr)
+	} else if cfg.Client.HttpProxy != "" {
+		// 使用静态HTTP代理
+		log.Info("使用静态HTTP代理: %s", cfg.Client.HttpProxy)
 		client.SetProxy(cfg.Client.HttpProxy)
 	}
 

@@ -4,7 +4,7 @@ import "time"
 
 // API 相关常量
 const (
-	DefaultBaseURL    = "https://scira-ebon-mu.vercel.app/"
+	DefaultBaseURL    = "https://scira.ai/"
 	APISearchEndpoint = "/api/search"
 	ContentTypeJSON   = "application/json"
 	UserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"

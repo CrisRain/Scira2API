@@ -41,10 +41,13 @@ type AuthConfig struct {
 
 // ClientConfig 客户端配置
 type ClientConfig struct {
-	HttpProxy string        `json:"http_proxy"`
-	Timeout   time.Duration `json:"timeout"`
-	Retry     int           `json:"retry"`
-	BaseURL   string        `json:"base_url"`
+	HttpProxy       string        `json:"http_proxy"`
+	Socks5Proxy     string        `json:"socks5_proxy"`
+	DynamicProxy    bool          `json:"dynamic_proxy"`
+	ProxyRefreshMin time.Duration `json:"proxy_refresh_min"`
+	Timeout         time.Duration `json:"timeout"`
+	Retry           int           `json:"retry"`
+	BaseURL         string        `json:"base_url"`
 }
 
 
@@ -147,7 +150,29 @@ func (c *Config) loadAuthConfig() error {
 
 // loadClientConfig 加载客户端配置
 func (c *Config) loadClientConfig() error {
+	// 加载HTTP代理
 	c.Client.HttpProxy = getProxy()
+	
+	// 加载SOCKS5代理
+	c.Client.Socks5Proxy = getEnvWithDefault("SOCKS5_PROXY", "")
+	
+	// 加载动态代理配置
+	dynamicProxyStr := getEnvWithDefault("DYNAMIC_PROXY", "false")
+	dynamicProxy, err := strconv.ParseBool(dynamicProxyStr)
+	if err != nil {
+		return fmt.Errorf("DYNAMIC_PROXY must be true or false, got: %s", dynamicProxyStr)
+	}
+	c.Client.DynamicProxy = dynamicProxy
+	
+	// 加载代理刷新间隔
+	proxyRefreshStr := getEnvWithDefault("PROXY_REFRESH_MIN", "30m")
+	proxyRefresh, err := time.ParseDuration(proxyRefreshStr)
+	if err != nil {
+		return fmt.Errorf("invalid PROXY_REFRESH_MIN: %s, error: %v", proxyRefreshStr, err)
+	}
+	c.Client.ProxyRefreshMin = proxyRefresh
+	
+	// 加载其他客户端配置
 	c.Client.Timeout = time.Duration(getEnvAsInt("CLIENT_TIMEOUT", int(constants.DefaultClientTimeout.Seconds()))) * time.Second
 	c.Client.BaseURL = getEnvWithDefault("BASE_URL", constants.DefaultBaseURL)
 
@@ -334,6 +359,18 @@ func (c *Config) UserIds() []string {
 
 func (c *Config) HttpProxy() string {
 	return c.Client.HttpProxy
+}
+
+func (c *Config) Socks5Proxy() string {
+	return c.Client.Socks5Proxy
+}
+
+func (c *Config) DynamicProxy() bool {
+	return c.Client.DynamicProxy
+}
+
+func (c *Config) ProxyRefreshMin() time.Duration {
+	return c.Client.ProxyRefreshMin
 }
 
 func (c *Config) Models() []string {
