@@ -58,27 +58,12 @@ func NewManager(fetchInterval time.Duration) *Manager {
 }
 
 // GetProxy 获取一个可用的SOCKS5代理地址 (格式: "ip:port")
-// 如果当前没有有效代理或者代理已过期，则尝试获取新的代理
+// 每次调用都会获取新的代理，不使用缓存
 func (m *Manager) GetProxy() (string, error) {
-	m.mu.RLock()
-	if m.currentProxy != "" && time.Since(m.lastFetchTime) < m.fetchInterval {
-		log.Info("使用缓存代理: %s", m.currentProxy)
-		proxy := m.currentProxy // 复制一份，避免在解锁后被修改
-		m.mu.RUnlock()
-		return proxy, nil
-	}
-	m.mu.RUnlock()
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 双重检查，防止在获取锁的过程中其他goroutine已经刷新了代理
-	if m.currentProxy != "" && time.Since(m.lastFetchTime) < m.fetchInterval {
-		log.Info("使用缓存代理 (双重检查): %s", m.currentProxy)
-		return m.currentProxy, nil
-	}
-
-	log.Info("当前无有效代理或代理已过期，正在获取新代理...")
+	log.Info("正在获取新代理...")
 	newProxy, err := m.fetchAndVerifyProxy()
 	if err != nil {
 		log.Error("获取并验证新代理失败: %v", err)
