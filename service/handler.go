@@ -52,11 +52,11 @@ func NewChatHandler(cfg *config.Config) *ChatHandler {
 		log.Info("连接池已禁用，使用默认HTTP客户端配置")
 	}
 	
-	// 初始化代理管理器（如果启用动态代理）
+	// 初始化代理池管理器（如果启用动态代理）
 	var proxyManager *proxy.Manager
 	if cfg.Client.DynamicProxy {
-		proxyManager = proxy.NewManager(cfg.Client.ProxyRefreshMin)
-		log.Info("动态SOCKS5代理已启用，刷新间隔: %v", cfg.Client.ProxyRefreshMin)
+		proxyManager = proxy.NewManager()
+		log.Info("动态SOCKS5代理池已启用")
 	}
 	
 	// 创建统一的resty HTTP客户端
@@ -285,6 +285,12 @@ func (h *ChatHandler) Close() error {
 		//     errs = append(errs, err)
 		//     log.Error("关闭连接池失败: %v", err)
 		// }
+	}
+	
+	// 关闭代理池管理器
+	if h.proxyManager != nil {
+		h.proxyManager.Stop()
+		log.Info("代理池资源已释放")
 	}
 	
 	// 关闭响应缓存

@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,12 +17,17 @@ import (
 )
 
 const (
-	proxyAPIURL      = "https://proxy.scdn.io/api/get_proxy.php?protocol=socks5&count=1"
+	proxyAPIURL      = "https://proxy.scdn.io/api/get_proxy.php?protocol=socks5&count=100"
 	proxyVerifyURL   = "https://ip.gs/"
 	proxyTimeout     = 10 * time.Second
 	maxRetries       = 3
 	retryDelay       = 2 * time.Second
 	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+	
+	// 代理池相关常量
+	minPoolSize      = 20      // 代理池最小数量，低于此值时触发刷新
+	refreshInterval  = 5 * time.Minute  // 定时刷新间隔
+	validateInterval = 2 * time.Minute  // 代理验证间隔
 )
 
 // ProxyInfo API响应结构
@@ -33,17 +40,25 @@ type ProxyInfo struct {
 	} `json:"data"`
 }
 
-// Manager 负责管理SOCKS5代理
-type Manager struct {
-	httpClient    *resty.Client
-	currentProxy  string
-	mu            sync.RWMutex
-	lastFetchTime time.Time
-	fetchInterval time.Duration // 代理刷新间隔
+// Proxy 代表一个代理及其元数据
+type Proxy struct {
+	Address    string    // 代理地址，格式: "ip:port"
+	LastVerify time.Time // 上次验证时间
+	FailCount  int       // 连续失败次数
 }
 
-// NewManager 创建一个新的代理管理器实例
-func NewManager(fetchInterval time.Duration) *Manager {
+// Manager 负责管理SOCKS5代理池
+type Manager struct {
+	httpClient   *resty.Client
+	proxyPool    []*Proxy     // 代理池
+	mu           sync.RWMutex // 保护代理池的互斥锁
+	ctx          context.Context
+	cancel       context.CancelFunc
+	refreshWg    sync.WaitGroup // 用于等待后台任务完成
+}
+
+// NewManager 创建一个新的代理管理器实例并启动代理池维护
+func NewManager() *Manager {
 	client := resty.New().
 		SetTimeout(proxyTimeout).
 		SetRetryCount(maxRetries).
@@ -51,75 +66,276 @@ func NewManager(fetchInterval time.Duration) *Manager {
 		SetRetryMaxWaitTime(20*time.Second).
 		SetHeader("User-Agent", defaultUserAgent)
 
-	return &Manager{
-		httpClient:    client,
-		fetchInterval: fetchInterval,
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	manager := &Manager{
+		httpClient: client,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
+	
+	// 初始化代理池
+	manager.initProxyPool()
+	
+	// 启动代理池维护任务
+	manager.startPoolMaintenance()
+	
+	return manager
 }
 
-// GetProxy 获取一个可用的SOCKS5代理地址 (格式: "ip:port")
-// 每次调用都会获取新的代理，不使用缓存
-func (m *Manager) GetProxy() (string, error) {
+// initProxyPool 初始化代理池
+func (m *Manager) initProxyPool() {
+	log.Info("初始化代理池...")
+	proxies, err := m.fetchAndVerifyProxies()
+	if err != nil {
+		log.Error("初始化代理池失败: %v", err)
+		return
+	}
+	
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	
+	m.proxyPool = proxies
+	log.Info("代理池初始化完成，当前代理数量: %d", len(m.proxyPool))
+}
 
-	log.Info("正在获取新代理...")
-	newProxy, err := m.fetchAndVerifyProxy()
+// startPoolMaintenance 启动代理池维护任务
+func (m *Manager) startPoolMaintenance() {
+	// 启动刷新代理池的协程
+	m.refreshWg.Add(1)
+	go func() {
+		defer m.refreshWg.Done()
+		ticker := time.NewTicker(refreshInterval)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-m.ctx.Done():
+				log.Info("停止代理池刷新任务")
+				return
+			case <-ticker.C:
+				m.refreshProxyPool()
+			}
+		}
+	}()
+	
+	// 启动验证代理有效性的协程
+	m.refreshWg.Add(1)
+	go func() {
+		defer m.refreshWg.Done()
+		ticker := time.NewTicker(validateInterval)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-m.ctx.Done():
+				log.Info("停止代理验证任务")
+				return
+			case <-ticker.C:
+				m.validateProxies()
+			}
+		}
+	}()
+	
+	log.Info("代理池维护任务已启动")
+}
+
+// Stop 停止代理池维护任务
+func (m *Manager) Stop() {
+	if m.cancel != nil {
+		m.cancel()
+		m.refreshWg.Wait()
+		log.Info("代理池维护任务已停止")
+	}
+}
+
+// GetProxy 从代理池中获取一个可用的SOCKS5代理地址
+func (m *Manager) GetProxy() (string, error) {
+	m.mu.RLock()
+	
+	if len(m.proxyPool) == 0 {
+		m.mu.RUnlock()
+		return m.refreshAndGetProxy()
+	}
+	
+	// 随机选择一个代理
+	randIndex := rand.Intn(len(m.proxyPool))
+	proxy := m.proxyPool[randIndex].Address
+	m.mu.RUnlock()
+	
+	log.Info("从代理池获取代理: %s", proxy)
+	return proxy, nil
+}
+
+// refreshAndGetProxy 刷新代理池并获取一个代理
+func (m *Manager) refreshAndGetProxy() (string, error) {
+	log.Info("代理池为空，正在刷新...")
+	if err := m.refreshProxyPool(); err != nil {
+		return "", fmt.Errorf("刷新代理池失败: %w", err)
+	}
+	
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	if len(m.proxyPool) == 0 {
+		return "", fmt.Errorf("代理池为空")
+	}
+	
+	// 随机选择一个代理
+	randIndex := rand.Intn(len(m.proxyPool))
+	proxy := m.proxyPool[randIndex].Address
+	
+	log.Info("从刷新后的代理池获取代理: %s", proxy)
+	return proxy, nil
+}
+
+// refreshProxyPool 刷新代理池
+func (m *Manager) refreshProxyPool() error {
+	log.Info("正在刷新代理池...")
+	
+	// 获取并验证新代理
+	newProxies, err := m.fetchAndVerifyProxies()
 	if err != nil {
-		log.Error("获取并验证新代理失败: %v", err)
-		// 即使获取失败，也更新获取时间，避免短时间内频繁尝试
-		m.lastFetchTime = time.Now()
-		return "", fmt.Errorf("无法获取有效代理: %w", err)
+		log.Error("获取新代理失败: %v", err)
+		return err
 	}
-
-	log.Info("获取到新的有效代理: %s", newProxy)
-	m.currentProxy = newProxy
-	m.lastFetchTime = time.Now()
-	return m.currentProxy, nil
+	
+	if len(newProxies) == 0 {
+		log.Warn("未获取到任何有效代理")
+		return fmt.Errorf("未获取到有效代理")
+	}
+	
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// 合并新旧代理池，保留不重复的代理
+	existingProxies := make(map[string]bool)
+	for _, p := range m.proxyPool {
+		existingProxies[p.Address] = true
+	}
+	
+	// 添加新的不重复代理
+	for _, newProxy := range newProxies {
+		if !existingProxies[newProxy.Address] {
+			m.proxyPool = append(m.proxyPool, newProxy)
+		}
+	}
+	
+	log.Info("代理池刷新完成，当前代理数量: %d", len(m.proxyPool))
+	return nil
 }
 
-// fetchAndVerifyProxy 尝试获取并验证一个新的SOCKS5代理
-func (m *Manager) fetchAndVerifyProxy() (string, error) {
-	for i := 0; i < maxRetries; i++ {
-		proxyAddr, err := m.fetchProxyFromAPI()
-		if err != nil {
-			log.Warn("从API获取代理失败 (尝试 %d/%d): %v", i+1, maxRetries, err)
-			time.Sleep(retryDelay)
-			continue
-		}
-
-		log.Info("获取到代理: %s，正在验证...", proxyAddr)
-		if m.verifyProxy(proxyAddr) {
-			log.Info("代理 %s 验证通过", proxyAddr)
-			return proxyAddr, nil
-		}
-		log.Warn("代理 %s 验证失败 (尝试 %d/%d)", proxyAddr, i+1, maxRetries)
-		time.Sleep(retryDelay)
+// validateProxies 验证代理池中的代理
+func (m *Manager) validateProxies() {
+	log.Info("开始验证代理池中的代理...")
+	
+	m.mu.RLock()
+	proxiesToValidate := make([]*Proxy, len(m.proxyPool))
+	copy(proxiesToValidate, m.proxyPool)
+	m.mu.RUnlock()
+	
+	var validProxies []*Proxy
+	var wg sync.WaitGroup
+	var mu sync.Mutex // 保护validProxies
+	
+	// 并发验证代理
+	for _, proxy := range proxiesToValidate {
+		wg.Add(1)
+		go func(p *Proxy) {
+			defer wg.Done()
+			if m.verifyProxy(p.Address) {
+				mu.Lock()
+				p.LastVerify = time.Now()
+				p.FailCount = 0
+				validProxies = append(validProxies, p)
+				mu.Unlock()
+			} else {
+				mu.Lock()
+				p.FailCount++
+				// 如果失败次数少于3次，仍然保留
+				if p.FailCount < 3 {
+					validProxies = append(validProxies, p)
+				} else {
+					log.Warn("代理 %s 连续验证失败 %d 次，移除", p.Address, p.FailCount)
+				}
+				mu.Unlock()
+			}
+		}(proxy)
 	}
-	return "", fmt.Errorf("尝试 %d 次后仍未获取到有效代理", maxRetries)
+	
+	wg.Wait()
+	
+	m.mu.Lock()
+	m.proxyPool = validProxies
+	poolSize := len(m.proxyPool)
+	m.mu.Unlock()
+	
+	log.Info("代理验证完成，有效代理数量: %d", poolSize)
+	
+	// 如果代理池数量低于最小值，触发刷新
+	if poolSize < minPoolSize {
+		log.Info("代理池数量 (%d) 低于最小值 (%d)，触发刷新", poolSize, minPoolSize)
+		go m.refreshProxyPool()
+	}
 }
 
-// fetchProxyFromAPI 从指定的API获取SOCKS5代理
-func (m *Manager) fetchProxyFromAPI() (string, error) {
+// fetchAndVerifyProxies 批量获取并验证代理
+func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
+	// 获取代理列表
+	proxyList, err := m.fetchProxiesFromAPI()
+	if err != nil {
+		return nil, err
+	}
+	
+	log.Info("从API获取到 %d 个代理，开始验证...", len(proxyList))
+	
+	var validProxies []*Proxy
+	var wg sync.WaitGroup
+	var mu sync.Mutex // 保护validProxies
+	
+	// 并发验证代理
+	for _, proxyAddr := range proxyList {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			if m.verifyProxy(addr) {
+				mu.Lock()
+				validProxies = append(validProxies, &Proxy{
+					Address:    addr,
+					LastVerify: time.Now(),
+				})
+				mu.Unlock()
+			}
+		}(proxyAddr)
+	}
+	
+	wg.Wait()
+	
+	log.Info("代理验证完成，有效代理数量: %d/%d", len(validProxies), len(proxyList))
+	return validProxies, nil
+}
+
+// fetchProxiesFromAPI 从指定的API批量获取SOCKS5代理
+func (m *Manager) fetchProxiesFromAPI() ([]string, error) {
 	resp, err := m.httpClient.R().Get(proxyAPIURL)
 	if err != nil {
-		return "", fmt.Errorf("请求代理API失败: %w", err)
+		return nil, fmt.Errorf("请求代理API失败: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return "", fmt.Errorf("代理API返回错误状态码: %d, body: %s", resp.StatusCode(), resp.String())
+		return nil, fmt.Errorf("代理API返回错误状态码: %d, body: %s", resp.StatusCode(), resp.String())
 	}
 
 	var proxyInfo ProxyInfo
 	if err := json.Unmarshal(resp.Body(), &proxyInfo); err != nil {
-		return "", fmt.Errorf("解析代理API响应失败: %w, body: %s", err, resp.String())
+		return nil, fmt.Errorf("解析代理API响应失败: %w, body: %s", err, resp.String())
 	}
 
 	if proxyInfo.Code != 200 || proxyInfo.Data.Count == 0 || len(proxyInfo.Data.Proxies) == 0 {
-		return "", fmt.Errorf("代理API返回无效数据: %+v", proxyInfo)
+		return nil, fmt.Errorf("代理API返回无效数据: %+v", proxyInfo)
 	}
 
-	return proxyInfo.Data.Proxies[0], nil
+	return proxyInfo.Data.Proxies, nil
 }
 
 // verifyProxy 验证SOCKS5代理是否有效
@@ -185,22 +401,25 @@ func (m *Manager) verifyProxy(proxyAddr string) bool {
 	return true
 }
 
-// ForceRefreshProxy 强制刷新当前代理
+// ForceRefreshProxy 强制刷新代理池并返回一个新代理
 func (m *Manager) ForceRefreshProxy() (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	log.Info("正在强制刷新代理...")
-	newProxy, err := m.fetchAndVerifyProxy()
-	if err != nil {
-		log.Error("强制刷新代理失败: %v", err)
-		// 即使获取失败，也更新获取时间，避免短时间内频繁尝试
-		m.lastFetchTime = time.Now()
-		return "", fmt.Errorf("无法获取有效代理: %w", err)
+	log.Info("正在强制刷新代理池...")
+	
+	if err := m.refreshProxyPool(); err != nil {
+		return "", fmt.Errorf("强制刷新代理池失败: %w", err)
 	}
-
-	log.Info("强制刷新获取到新的有效代理: %s", newProxy)
-	m.currentProxy = newProxy
-	m.lastFetchTime = time.Now()
-	return m.currentProxy, nil
+	
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	if len(m.proxyPool) == 0 {
+		return "", fmt.Errorf("代理池为空")
+	}
+	
+	// 随机选择一个代理
+	randIndex := rand.Intn(len(m.proxyPool))
+	proxy := m.proxyPool[randIndex].Address
+	
+	log.Info("强制刷新后获取到代理: %s", proxy)
+	return proxy, nil
 }

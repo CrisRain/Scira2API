@@ -82,8 +82,8 @@ func main() {
 	
 	// 添加代理测试路由
 	router.GET("/proxy/test", func(c *gin.Context) {
-		// 创建一个代理管理器实例，30分钟刷新一次
-		proxyManager := proxy.NewManager(30 * time.Minute)
+		// 创建一个代理池管理器实例
+		proxyManager := proxy.NewManager()
 		
 		// 获取一个代理
 		proxyAddr, err := proxyManager.GetProxy()
