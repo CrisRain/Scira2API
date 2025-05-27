@@ -20,7 +20,6 @@ type Config struct {
 	Server          ServerConfig    `json:"server"`
 	Auth            AuthConfig      `json:"auth"`
 	Client          ClientConfig    `json:"client"`
-	AvailableModels ModelsConfig    `json:"models"`
 	Chat            ChatConfig      `json:"chat"`
 	Cache           CacheConfig     `json:"cache"`
 	ConnPool        ConnPoolConfig  `json:"conn_pool"`
@@ -48,10 +47,6 @@ type ClientConfig struct {
 	BaseURL   string        `json:"base_url"`
 }
 
-// ModelsConfig 模型配置
-type ModelsConfig struct {
-	Available []string `json:"available"`
-}
 
 // ChatConfig 聊天配置
 type ChatConfig struct {
@@ -99,7 +94,6 @@ func NewConfig() (*Config, error) {
 		{"server", config.loadServerConfig},
 		{"auth", config.loadAuthConfig},
 		{"client", config.loadClientConfig},
-		{"models", config.loadModelsConfig},
 		{"chat", config.loadChatConfig},
 		{"cache", config.loadCacheConfig},
 		{"conn_pool", config.loadConnPoolConfig},
@@ -163,22 +157,6 @@ func (c *Config) loadClientConfig() error {
 	return nil
 }
 
-// loadModelsConfig 加载模型配置
-func (c *Config) loadModelsConfig() error {
-	modelsEnv := getEnvWithDefault("MODELS", constants.DefaultModels)
-	models := strings.Split(modelsEnv, ",")
-
-	// 清理模型名称
-	var cleanModels []string
-	for _, model := range models {
-		if trimmed := strings.TrimSpace(model); trimmed != "" {
-			cleanModels = append(cleanModels, trimmed)
-		}
-	}
-
-	c.AvailableModels.Available = cleanModels
-	return nil
-}
 
 // loadChatConfig 加载聊天配置
 func (c *Config) loadChatConfig() error {
@@ -301,11 +279,6 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid port: %s", c.Server.Port)
 	}
 
-	// 验证模型
-	if len(c.AvailableModels.Available) == 0 {
-		return fmt.Errorf("at least one model must be available")
-	}
-
 	// 验证重试次数
 	if c.Client.Retry < 1 {
 		return fmt.Errorf("retry count must be at least 1")
@@ -364,7 +337,19 @@ func (c *Config) HttpProxy() string {
 }
 
 func (c *Config) Models() []string {
-	return c.AvailableModels.Available
+	// 从ModelMapping中获取所有内部模型名称
+	internalModels := make(map[string]bool)
+	for _, internalName := range ModelMapping {
+		internalModels[internalName] = true
+	}
+	
+	// 转换为切片
+	models := make([]string, 0, len(internalModels))
+	for model := range internalModels {
+		models = append(models, model)
+	}
+	
+	return models
 }
 
 func (c *Config) Retry() int {
@@ -373,4 +358,15 @@ func (c *Config) Retry() int {
 
 func (c *Config) ChatDelete() bool {
 	return c.Chat.Delete
+}
+
+// GetModelMapping 返回模型映射。
+// 此函数允许其他包安全地访问 ModelMapping，
+// 而无需直接访问包级变量，从而保持封装性。
+func (c *Config) GetModelMapping() map[string]string {
+	// 返回 ModelMapping 的副本以防止外部修改
+	// 或者直接返回 ModelMapping 如果不担心外部修改。
+	// 为了简单和性能，这里直接返回。
+	// 如果需要更强的封装，可以考虑返回一个副本。
+	return ModelMapping
 }

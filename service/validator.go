@@ -12,9 +12,16 @@ func (h *ChatHandler) chatParamCheck(request models.OpenAIChatCompletionsRequest
 		return fmt.Errorf("model is required")
 	}
 
-	if !slices.Contains(h.config.AvailableModels.Available, request.Model) {
+	// 检查请求的模型是否在 ModelMapping 中定义为外部模型名
+	// ModelMapping 的键是外部模型名
+	var availableExternalModels []string
+	for externalName := range h.config.GetModelMapping() { // 使用辅助函数获取 ModelMapping
+		availableExternalModels = append(availableExternalModels, externalName)
+	}
+
+	if !slices.Contains(availableExternalModels, request.Model) {
 		return fmt.Errorf("model '%s' is not supported. Available models: %v",
-			request.Model, h.config.AvailableModels.Available)
+			request.Model, availableExternalModels)
 	}
 
 	if len(request.Messages) == 0 {

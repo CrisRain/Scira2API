@@ -25,9 +25,11 @@ func (h *ChatHandler) ModelGetHandler(c *gin.Context) {
 	
 	// 缓存未命中，生成模型列表
 	log.Debug("从配置生成模型列表")
-	data := make([]models.OpenAIModelResponse, 0, len(h.config.AvailableModels.Available))
+	// 使用更新后的 Models() 函数获取模型列表
+	availableModels := h.config.Models()
+	data := make([]models.OpenAIModelResponse, 0, len(availableModels))
 
-	for _, modelID := range h.config.AvailableModels.Available {
+	for _, modelID := range availableModels {
 		// 检查是否需要转换为外部模型名称
 		externalModelID := GetExternalModelName(modelID)
 		model := models.NewModelResponse(externalModelID)
