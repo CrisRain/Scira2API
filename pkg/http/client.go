@@ -2,9 +2,14 @@ package http
 
 import (
 	"context"
+	"fmt"     // Added for error formatting
+	"net"     // Added for net.Conn
 	"net/http"
 	"net/url"
+	"strings" // Added for scheme checking
 	"time"
+
+	"golang.org/x/net/proxy" // Added for SOCKS5 proxy
 )
 
 // ProxyManager 代理管理器接口
@@ -86,23 +91,74 @@ func (c *HttpClient) SetRetryMaxWaitTime(maxWaitTime time.Duration) *HttpClient 
 }
 
 // SetProxy 设置代理
-func (c *HttpClient) SetProxy(proxyURL string) *HttpClient {
-	c.proxyURL = proxyURL
-	
-	// 创建Transport
-	transport := &http.Transport{}
-	
-	// 配置代理
-	if proxyURL != "" {
-		proxyFunc, err := createProxyFunc(proxyURL)
-		if err == nil {
-			transport.Proxy = proxyFunc
+// Note: The 'proxy.SOCKS5' call below is from the original user snippet.
+// The 'proxy' package and 'proxy.SOCKS5' function are not defined in standard Go
+// or in the provided file's imports. This will cause a compilation error unless
+// a specific 'proxy' package providing this function is imported and works as expected.
+func (c *HttpClient) SetProxy(proxyURLStr string) (*HttpClient, error) {
+	c.proxyURL = proxyURLStr
+
+	if proxyURLStr == "" {
+		// Clear proxy settings
+		if existingTransport, ok := c.client.Transport.(*http.Transport); ok && existingTransport != nil {
+			clonedTransport := existingTransport.Clone()
+			clonedTransport.Proxy = nil
+			clonedTransport.DialContext = nil // Reset to default dial behavior
+			c.client.Transport = clonedTransport
+		} else {
+			// If not an *http.Transport or c.client.Transport was nil,
+			// create a new default transport (or reset to http.DefaultTransport).
+			c.client.Transport = &http.Transport{}
+		}
+		return c, nil
+	}
+
+	parsedURL, err := url.Parse(proxyURLStr)
+	if err != nil {
+		return c, fmt.Errorf("invalid proxy URL '%s': %w", proxyURLStr, err)
+	}
+
+	// Initialize or clone transport to preserve other settings
+	newTransport := &http.Transport{} // Default new transport
+	if c.client.Transport != nil {
+		if T, ok := c.client.Transport.(*http.Transport); ok {
+			newTransport = T.Clone() // Clone if existing is *http.Transport
+		} else {
+			// If existing transport is not *http.Transport, we cannot reliably set a proxy on it.
+			return c, fmt.Errorf("cannot set proxy: existing client transport is of type %T, not *http.Transport", c.client.Transport)
 		}
 	}
-	
-	// 更新客户端
-	c.client.Transport = transport
-	return c
+
+	switch strings.ToLower(parsedURL.Scheme) {
+	case "http", "https":
+		proxyFunc, err_http := createProxyFunc(proxyURLStr) // createProxyFunc is defined below
+		if err_http != nil {
+			return c, fmt.Errorf("failed to create HTTP/S proxy func for '%s': %w", proxyURLStr, err_http)
+		}
+		newTransport.Proxy = proxyFunc
+		newTransport.DialContext = nil // Ensure SOCKS dialer (if any) is not used
+	case "socks5":
+		// Use proxy.SOCKS5 from golang.org/x/net/proxy
+		// parsedURL.Host should contain the SOCKS5 server address (host:port)
+		// Assuming no authentication for SOCKS5 proxy for now (auth = nil)
+		dialer, err_socks := proxy.SOCKS5("tcp", parsedURL.Host, nil, proxy.Direct)
+		if err_socks != nil {
+			return c, fmt.Errorf("failed to initialize SOCKS5 dialer for '%s' (%s): %w", proxyURLStr, parsedURL.Host, err_socks)
+		}
+		// The dialer returned by proxy.SOCKS5 is of type proxy.Dialer,
+		// which has a Dial(network, address string) (net.Conn, error) method.
+		newTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// The proxy.Dialer interface's Dial method does not take a context.
+			// net.Dialer (which proxy.Direct uses) respects context passed to http.Request.
+			return dialer.Dial(network, addr)
+		}
+		newTransport.Proxy = nil // Ensure HTTP proxy (if any) is not used
+	default:
+		return c, fmt.Errorf("unsupported proxy scheme '%s' in URL '%s'", parsedURL.Scheme, proxyURLStr)
+	}
+
+	c.client.Transport = newTransport
+	return c, nil
 }
 
 // createProxyFunc 创建代理函数

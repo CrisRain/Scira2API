@@ -123,7 +123,6 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 	
 	// 重试逻辑
 	var resp *Response
-	var err error
 	
 	attempts := r.client.retryCount + 1
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -235,10 +234,6 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 		}
 		
 		return resp, nil
-	}
-	
-	if err != nil {
-		return nil, fmt.Errorf("所有请求尝试均失败: %w", err)
 	}
 	
 	return nil, fmt.Errorf("请求失败，无详细错误")

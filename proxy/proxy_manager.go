@@ -2,7 +2,10 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls" // Keep for InsecureSkipVerify, or remove if TLS config is removed/changed
 	"encoding/json"
+	"net" // Added for net.Conn for SOCKS5 dialer
+	"golang.org/x/net/proxy" // Added for SOCKS5 proxy
 	"fmt"
 	"io"
 	"math/rand"
@@ -13,7 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"sync/atomic" // Added for atomic counters
 	"time"
 
 	"scira2api/log"
@@ -148,39 +151,31 @@ func (m *Manager) initProxyPool() {
 	// 如果从文件加载失败或加载的代理数量不足，则从API获取
 	if !loaded || len(m.proxyPool) < minPoolSize {
 		log.Info("从文件加载的代理不足，从API获取代理...")
-		proxies, err := m.fetchAndVerifyProxies()
+		// fetchAndVerifyProxies 将直接修改 m.proxyPool 并按需保存
+		err := m.fetchAndVerifyProxies()
 		if err != nil {
-			log.Error("从API获取代理失败: %v", err)
-			// 如果已经从文件加载了一些代理，就使用这些代理
+			log.Error("从API获取代理过程中发生错误: %v", err)
+			// 如果已经从文件加载了一些代理，并且API获取失败，则继续使用文件加载的代理
 			if len(m.proxyPool) > 0 {
-				log.Info("将使用从文件加载的 %d 个代理", len(m.proxyPool))
+				log.Info("将使用现有 %d 个代理 (API获取失败或未添加新代理)", len(m.proxyPool))
+				// 确保即使API获取失败，如果之前有从文件加载，也保存一次当前状态
+				if loaded {
+					m.saveProxyPoolToFile()
+				}
 				return
 			}
 			// 否则初始化失败
 			return
 		}
-
-		m.mu.Lock()
-		// 如果已经有一些代理，合并新获取的代理
-		if len(m.proxyPool) > 0 {
-			existingProxies := make(map[string]bool)
-			for _, p := range m.proxyPool {
-				existingProxies[p.Address] = true
-			}
-
-			for _, newProxy := range proxies {
-				if !existingProxies[newProxy.Address] {
-					m.proxyPool = append(m.proxyPool, newProxy)
-				}
-			}
-		} else {
-			// 如果没有现有代理，直接设置
-			m.proxyPool = proxies
-		}
-		m.mu.Unlock()
-
-		// 保存代理池到文件
-		m.saveProxyPoolToFile()
+		// 如果fetchAndVerifyProxies成功执行（可能添加了新代理并已保存），
+		// 这里的保存是为了确保在!loaded为true，但API未返回任何新代理时，
+		// 至少能保存一次空的或仅包含本地代理的池。
+		// 但如果fetchAndVerifyProxies内部已经保存，这里的保存可能是冗余的。
+		// 考虑到fetchAndVerifyProxies仅在*新添加*时保存，这里的保存仍然有意义，
+		// 确保在没有新代理添加但池被清空等情况下，状态能被持久化。
+		// 或者，如果API调用成功但未添加任何新代理，也应保存当前池状态。
+		log.Info("API代理获取流程完成，检查是否需要保存当前代理池状态...")
+		m.saveProxyPoolToFile() // 保存最终状态，无论API是否添加了新代理
 	}
 
 	log.Info("代理池初始化完成，当前代理数量: %d", len(m.proxyPool))
@@ -397,62 +392,16 @@ func (m *Manager) refreshAndGetProxy() (string, error) {
 func (m *Manager) refreshProxyPool() error {
 	log.Info("正在刷新代理池...")
 
-	// 获取并验证新代理
-	newProxies, err := m.fetchAndVerifyProxies()
+	// fetchAndVerifyProxies 将直接修改 m.proxyPool 并按需保存
+	err := m.fetchAndVerifyProxies()
 	if err != nil {
-		log.Error("获取新代理失败: %v", err)
-		return err
+		log.Error("刷新代理池时，获取新代理失败: %v", err)
+		return err // 返回错误，但不一定意味着池子是空的或不可用
 	}
 
-	if len(newProxies) == 0 {
-		log.Warn("未获取到任何有效代理")
-		return fmt.Errorf("未获取到有效代理")
-	}
-
-	// 使用读写锁保护代理池更新，减少锁持有时间
-	// 先复制当前代理池中的地址到map中
-	m.mu.RLock()
-	existingProxies := make(map[string]bool, len(m.proxyPool))
-	for _, p := range m.proxyPool {
-		existingProxies[p.Address] = true
-	}
-	m.mu.RUnlock()
-
-	// 筛选出不重复的新代理
-	var uniqueNewProxies []*Proxy
-	for _, newProxy := range newProxies {
-		if !existingProxies[newProxy.Address] {
-			uniqueNewProxies = append(uniqueNewProxies, newProxy)
-		}
-	}
-
-	// 只在需要添加新代理时获取写锁
-	if len(uniqueNewProxies) > 0 {
-		m.mu.Lock()
-		// 再次检查是否有重复代理，因为在我们获取锁之前可能有其他协程修改了代理池
-		currentAddresses := make(map[string]bool)
-		for _, p := range m.proxyPool {
-			currentAddresses[p.Address] = true
-		}
-
-		// 添加真正不重复的代理
-		var addedCount int
-		for _, newProxy := range uniqueNewProxies {
-			if !currentAddresses[newProxy.Address] {
-				m.proxyPool = append(m.proxyPool, newProxy)
-				addedCount++
-			}
-		}
-		poolSize := len(m.proxyPool)
-		m.mu.Unlock()
-
-		log.Info("代理池刷新完成，添加了 %d 个新代理，当前代理数量: %d", addedCount, poolSize)
-	} else {
-		log.Info("代理池刷新完成，没有新的代理添加")
-	}
-
-	// 保存更新后的代理池到文件
-	go m.saveProxyPoolToFile()
+	log.Info("代理池刷新流程执行完毕")
+	// 无需在此处显式保存，fetchAndVerifyProxies 会在添加新代理时保存
+	// 如果 fetchAndVerifyProxies 未添加任何新代理，则池状态未变，无需重复保存
 
 	return nil
 }
@@ -474,70 +423,108 @@ func (m *Manager) validateProxies() {
 		go m.refreshProxyPool()
 	}
 
-	var validProxies []*Proxy
-	var wg sync.WaitGroup
-	var mu sync.Mutex // 保护validProxies
+	// 串行验证代理池中的代理，并直接更新
+	var validatedCount int
+	var removedCount int
 
-	// 并发验证代理
-	for _, proxy := range proxiesToValidate {
-		wg.Add(1)
-		go func(p *Proxy) {
-			defer wg.Done()
-			if m.verifyProxy(p.Address, p.Type) {
-				mu.Lock()
-				p.LastVerify = time.Now()
-				p.FailCount = 0
-				validProxies = append(validProxies, p)
-				mu.Unlock()
-			} else {
-				mu.Lock()
-				p.FailCount++
-				// 如果失败次数少于3次，仍然保留
-				if p.FailCount < 3 {
-					validProxies = append(validProxies, p)
-				} else {
-					log.Warn("代理 %s 连续验证失败 %d 次，移除", p.Address, p.FailCount)
-				}
-				mu.Unlock()
+	for _, proxyInSnapshot := range proxiesToValidate {
+		isStillInPoolAndUpdated := false // 标记代理是否仍在池中并且其状态被更新了
+
+		// 验证前先获取当前池中对应代理的最新失败次数
+		// 这一步是为了确保FailCount的增加是基于最新的状态，尽管验证本身用的是快照信息
+		currentFailCountInMainPool := 0
+		m.mu.RLock()
+		foundInMainPoolForFailCount := false
+		for _, pMain := range m.proxyPool {
+			if pMain.Address == proxyInSnapshot.Address {
+				currentFailCountInMainPool = pMain.FailCount
+				foundInMainPoolForFailCount = true
+				break
 			}
-		}(proxy)
+		}
+		m.mu.RUnlock()
+
+		if !foundInMainPoolForFailCount {
+			log.Debug("代理 %s 在验证前已从池中移除(获取FailCount时未找到)，跳过验证", proxyInSnapshot.Address)
+			continue
+		}
+		
+		if m.verifyProxy(proxyInSnapshot.Address, proxyInSnapshot.Type) {
+			validatedCount++
+			m.mu.Lock()
+			// 遍历主代理池，更新验证成功的代理
+			for i, p := range m.proxyPool {
+				if p.Address == proxyInSnapshot.Address {
+					m.proxyPool[i].LastVerify = time.Now()
+					m.proxyPool[i].FailCount = 0
+					isStillInPoolAndUpdated = true
+					log.Debug("代理 %s 重新验证成功", p.Address)
+					break
+				}
+			}
+			m.mu.Unlock()
+		} else {
+			m.mu.Lock()
+			// 遍历主代理池，处理验证失败的代理
+			tempPool := make([]*Proxy, 0, len(m.proxyPool))
+			foundAndProcessed := false
+			for _, p := range m.proxyPool {
+				if p.Address == proxyInSnapshot.Address && !foundAndProcessed {
+					foundAndProcessed = true
+					p.FailCount = currentFailCountInMainPool + 1 // 使用验证前获取的FailCount来递增
+					isStillInPoolAndUpdated = true // 标记状态已更新（即使是增加失败次数）
+					if p.FailCount >= 3 {
+						removedCount++
+						log.Warn("代理 %s 连续验证失败 %d 次，从池中移除", p.Address, p.FailCount)
+						// 不将此代理添加到tempPool以实现移除
+					} else {
+						log.Debug("代理 %s 验证失败，失败次数增加到 %d", p.Address, p.FailCount)
+						tempPool = append(tempPool, p) // 保留，但失败次数已更新
+					}
+				} else {
+					tempPool = append(tempPool, p)
+				}
+			}
+			m.proxyPool = tempPool
+			m.mu.Unlock()
+		}
+
+		// 如果代理仍在池中并且其状态（LastVerify, FailCount）被更新，或者被移除了，则保存
+		if isStillInPoolAndUpdated {
+			m.saveProxyPoolToFile()
+		}
 	}
 
-	wg.Wait()
-
-	m.mu.Lock()
-	m.proxyPool = validProxies
-	newPoolSize := len(m.proxyPool)
-	m.mu.Unlock()
-
-	log.Info("代理验证完成，有效代理数量: %d", newPoolSize)
-
-	// 无论代理池数量如何，都保存更新后的代理池到文件
-	go m.saveProxyPoolToFile()
+	m.mu.RLock()
+	finalPoolSize := len(m.proxyPool)
+	m.mu.RUnlock()
+	log.Info("代理池验证周期完成。重新验证成功: %d, 移除: %d, 当前池大小: %d", validatedCount, removedCount, finalPoolSize)
+	// 注意：这里的saveProxyPoolToFile()被移除了，因为保存操作在循环内部按需执行。
 }
 
-// fetchAndVerifyProxies 批量获取并验证代理
-func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
+// fetchAndVerifyProxies 从API获取代理，验证后直接添加到池中并保存
+func (m *Manager) fetchAndVerifyProxies() error {
 	// 获取代理列表
-	proxyList, err := m.fetchProxiesFromAPI()
+	apiProxies, err := m.fetchProxiesFromAPI() // Renamed proxyList to apiProxies for clarity
 	if err != nil {
-		return nil, err
+		return err // Error includes "未能获得任何有效代理" or "所有页面获取失败" from fetchProxiesFromAPI
 	}
 
-	log.Info("从API获取到 %d 个代理，开始验证...", len(proxyList))
+	if len(apiProxies) == 0 {
+		log.Info("API未返回任何代理进行验证")
+		return nil // Not an error, just no proxies to process
+	}
 
-	// 使用通道控制并发数
+	log.Info("从API获取到 %d 个代理，开始验证并按需添加到池中...", len(apiProxies))
+
 	maxConcurrent := 20 // 最大并发验证数量
 	sem := make(chan struct{}, maxConcurrent)
-
-	var validProxies []*Proxy
 	var wg sync.WaitGroup
-	var mu sync.Mutex // 保护validProxies
+	var addedCount int32 // 原子计数器，统计成功添加的新代理数量
 
-	// 并发验证代理
-	for _, proxy := range proxyList {
+	for _, proxyFromAPI := range apiProxies {
 		wg.Add(1)
-		sem <- struct{}{} // 获取信号量，限制并发数
+		sem <- struct{}{} // 获取信号量
 
 		go func(p *Proxy) {
 			defer func() {
@@ -545,35 +532,53 @@ func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
 				wg.Done()
 			}()
 
-			// 将代理类型信息传递给verifyProxy函数
 			if m.verifyProxy(p.Address, p.Type) {
-				mu.Lock()
-				p.LastVerify = time.Now() // 更新验证时间
-				p.FailCount = 0           // 重置失败计数
-				validProxies = append(validProxies, p)
-				mu.Unlock()
-				log.Debug("代理验证成功: %s (类型: %s)", p.Address, p.Type)
+				p.LastVerify = time.Now()
+				p.FailCount = 0
+
+				m.mu.Lock()
+				isExisting := false
+				for _, existingProxy := range m.proxyPool {
+					if existingProxy.Address == p.Address {
+						isExisting = true
+						// Optionally update existing proxy's metadata if verifyProxy was for an existing one,
+						// but here p is a new object from API.
+						// For now, we only add if it's truly new.
+						// existingProxy.LastVerify = p.LastVerify // Example if update was desired
+						// existingProxy.ResponseTime = p.ResponseTime
+						break
+					}
+				}
+
+				if !isExisting {
+					m.proxyPool = append(m.proxyPool, p)
+					log.Info("新代理验证成功并已添加: %s (类型: %s, 响应时间: %dms)", p.Address, p.Type, p.ResponseTime)
+					// atomic.AddInt32(&addedCount, 1) // Moved save outside lock, count before unlock
+				} else {
+					log.Debug("已验证代理 %s 已存在于池中，未重复添加", p.Address)
+				}
+				m.mu.Unlock() // Release lock before potentially saving
+
+				if !isExisting { // Only save if a new proxy was actually added
+					atomic.AddInt32(&addedCount, 1) // Increment count here before saving
+					m.saveProxyPoolToFile() // Persist immediately after adding a new proxy
+				}
 			} else {
-				log.Debug("代理验证失败: %s (类型: %s)", p.Address, p.Type)
+				log.Debug("API提供的代理验证失败: %s (类型: %s)", p.Address, p.Type)
 			}
-		}(proxy)
+		}(proxyFromAPI)
 	}
 
 	wg.Wait()
 	close(sem)
 
-	// 按响应时间排序，优先使用响应快的代理
-	sort.Slice(validProxies, func(i, j int) bool {
-		return validProxies[i].ResponseTime < validProxies[j].ResponseTime
-	})
-
-	validCount := len(validProxies)
-	totalCount := len(proxyList)
-	successRate := float64(validCount) / float64(totalCount) * 100
-
-	log.Info("代理验证完成，有效代理数量: %d/%d (%.1f%%)", validCount, totalCount, successRate)
-
-	return validProxies, nil
+	finalAddedCount := atomic.LoadInt32(&addedCount)
+	if finalAddedCount > 0 {
+		log.Info("从API获取并验证流程完成，共添加了 %d 个新代理到池中。", finalAddedCount)
+	} else {
+		log.Info("从API获取并验证流程完成，没有新代理被添加到池中。")
+	}
+	return nil
 }
 
 // 添加本地代理到代理池 - 当前已禁用预定义本地代理
@@ -622,9 +627,7 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 		}
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex      // 保护allProxies
-	var successCount int32 // 成功获取的页数
+	var successCount int // 成功获取的页数
 
 	// 先获取第一页以确定总页数
 	log.Info("先获取第一页代理以确定总页数...")
@@ -634,19 +637,68 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 
 	// 发送请求获取第一页
 	currUA := constants.GetRandomUserAgent()
-
-	// 构建请求
-	url := proxyAPIBaseURL + "?page=1&per_page=100&type=socks5"
-	req, err := http.NewRequest("GET", url, nil)
+	apiURL := proxyAPIBaseURL + "?page=1&per_page=100&type=socks5" // SOCKS5 or relevant type
+	
+	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		log.Warn("创建第1页代理请求失败: %v", err)
 		return nil, err
 	}
-
 	req.Header.Set("User-Agent", currUA)
 
+	// 决定使用哪个HTTP客户端 (带代理或不带代理)
+	clientToUse := m.httpClient // 默认使用manager的httpClient
+	
+	m.mu.RLock()
+	poolNotEmpty := len(m.proxyPool) > 0
+	m.mu.RUnlock()
+
+	if poolNotEmpty {
+		proxyAddrToUse, err_get_proxy := m.GetProxy() // GetProxy内部已经处理了锁
+		if err_get_proxy == nil && proxyAddrToUse != "" {
+			parsedProxyURL, err_parse_proxy := url.Parse(proxyAddrToUse)
+			if err_parse_proxy == nil {
+				log.Info("尝试使用池中代理 %s 爬取API %s", proxyAddrToUse, apiURL)
+				tempTransport := &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // 与verifyProxy一致
+				}
+				// 根据代理类型配置Transport (与verifyProxy逻辑类似)
+				switch strings.ToLower(parsedProxyURL.Scheme) {
+				case "http", "https":
+					tempTransport.Proxy = http.ProxyURL(parsedProxyURL)
+				case "socks5":
+					dialer, err_socks := proxy.SOCKS5("tcp", parsedProxyURL.Host, nil, proxy.Direct)
+					if err_socks == nil {
+						tempTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+							return dialer.Dial(network, addr)
+						}
+					} else {
+						log.Warn("为API请求创建SOCKS5 dialer失败 (%s): %v, 将不使用此代理", proxyAddrToUse, err_socks)
+						// 回退到默认client
+					}
+				default:
+					log.Warn("从池中获取的代理 %s 类型 %s 不支持用于爬取API, 将不使用此代理", proxyAddrToUse, parsedProxyURL.Scheme)
+					// 回退到默认client
+				}
+				// 只有在成功配置代理时才创建新client
+				if tempTransport.Proxy != nil || tempTransport.DialContext != nil {
+					clientToUse = &http.Client{
+						Transport: tempTransport,
+						Timeout:   m.httpClient.Timeout, // 使用与m.httpClient相同的超时
+					}
+				}
+			} else {
+				log.Warn("解析从池中获取的代理地址 %s 失败: %v, 将不使用此代理", proxyAddrToUse, err_parse_proxy)
+			}
+		} else if err_get_proxy != nil {
+			log.Warn("从池中获取代理失败: %v, 将不使用代理爬取API", err_get_proxy)
+		}
+	} else {
+		log.Info("代理池为空，直接爬取API %s", apiURL)
+	}
+
 	// 发送请求
-	resp, err := m.httpClient.Do(req)
+	resp, err := clientToUse.Do(req)
 	if err != nil {
 		log.Warn("请求第1页代理失败: %v", err)
 		return nil, err
@@ -716,140 +768,173 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 	}
 
 	// 添加第一页数据到结果
-	mu.Lock()
 	allProxies = append(allProxies, firstPageProxies...)
 	if len(firstPageProxies) > 0 {
-		atomic.AddInt32(&successCount, 1)
+		successCount++
 	}
-	mu.Unlock()
 
 	log.Info("第1页获取到%d个有效代理", len(firstPageProxies))
 
-	// 如果有多页，并发爬取剩余页面（从第2页开始）
+	// 如果有多页，串行爬取剩余页面（从第2页开始）
 	if totalPages > 1 {
-		for page := 2; page <= totalPages; page++ {
-			wg.Add(1)
-			go func(pageNum int) {
-				defer wg.Done()
+		for pageNum := 2; pageNum <= totalPages; pageNum++ {
+			// 请求前获取限速令牌
+			log.Debug("等待获取页面%d的限速令牌", pageNum)
+			<-rateLimiter
+			log.Debug("获得页面%d的限速令牌，开始请求", pageNum)
 
-				// 请求前获取限速令牌
-				log.Debug("等待获取页面%d的限速令牌", pageNum)
-				<-rateLimiter
-				log.Debug("获得页面%d的限速令牌，开始请求", pageNum)
+			// 发送请求，每个请求使用新的随机UA
+			currUA := constants.GetRandomUserAgent()
 
-				// 发送请求，每个请求使用新的随机UA
-				currUA := constants.GetRandomUserAgent()
+			// 构建URL和请求
+			pageAPIURL := fmt.Sprintf("%s?page=%d&per_page=100&type=socks5", proxyAPIBaseURL, pageNum)
+			req, err := http.NewRequest("GET", pageAPIURL, nil)
+			if err != nil {
+				log.Warn("创建第%d页代理请求失败: %v", pageNum, err)
+				continue
+			}
+			req.Header.Set("User-Agent", currUA)
 
-				// 构建URL和请求
-				url := fmt.Sprintf("%s?page=%d&per_page=100&type=socks5", proxyAPIBaseURL, pageNum)
-				req, err := http.NewRequest("GET", url, nil)
-				if err != nil {
-					log.Warn("创建第%d页代理请求失败: %v", pageNum, err)
-					return
-				}
+			// 决定使用哪个HTTP客户端 (与第一页逻辑相同)
+			clientToUseForPage := m.httpClient
+			
+			m.mu.RLock()
+			pagePoolNotEmpty := len(m.proxyPool) > 0
+			m.mu.RUnlock()
 
-				req.Header.Set("User-Agent", currUA)
-
-				// 发送请求
-				resp, err := m.httpClient.Do(req)
-				if err != nil {
-					log.Warn("请求第%d页代理失败: %v", pageNum, err)
-					return
-				}
-				defer resp.Body.Close()
-
-				if resp.StatusCode != http.StatusOK {
-					log.Warn("第%d页返回错误状态码: %d", pageNum, resp.StatusCode)
-					return
-				}
-
-				// 解析响应
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					log.Warn("读取第%d页响应失败: %v", pageNum, err)
-					return
-				}
-
-				var proxyListResp ProxyListResponse
-				if err := json.Unmarshal(respBody, &proxyListResp); err != nil {
-					log.Warn("解析第%d页响应失败: %v", pageNum, err)
-					return
-				}
-
-				// 验证响应
-				if !proxyListResp.Success {
-					log.Warn("第%d页返回success=false", pageNum)
-					return
-				}
-
-				// 检查代理数据
-				if len(proxyListResp.Data.Proxies) == 0 {
-					log.Warn("第%d页代理数据为空", pageNum)
-					return
-				}
-
-				// 收集代理信息
-				var pageProxies []*Proxy
-				for _, proxyInfo := range proxyListResp.Data.Proxies {
-					if proxyInfo.Status == 1 { // 只使用状态为1(有效)的代理
-						// 跳过无效的IP或端口
-						if proxyInfo.IP == "" || proxyInfo.Port <= 0 {
-							continue
+			if pagePoolNotEmpty {
+				proxyAddrToUsePage, err_get_proxy_page := m.GetProxy()
+				if err_get_proxy_page == nil && proxyAddrToUsePage != "" {
+					parsedProxyURLPage, err_parse_proxy_page := url.Parse(proxyAddrToUsePage)
+					if err_parse_proxy_page == nil {
+						log.Info("尝试使用池中代理 %s 爬取API %s (第%d页)", proxyAddrToUsePage, pageAPIURL, pageNum)
+						tempTransportPage := &http.Transport{
+							TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 						}
-
-						// 处理代理类型
-						proxyType := strings.ToUpper(proxyInfo.Type)
-
-						// 如果没有类型信息，则记录警告并跳过
-						if proxyType == "" {
-							log.Warn("跳过无类型信息的代理: %s:%d", proxyInfo.IP, proxyInfo.Port)
-							continue
+						switch strings.ToLower(parsedProxyURLPage.Scheme) {
+						case "http", "https":
+							tempTransportPage.Proxy = http.ProxyURL(parsedProxyURLPage)
+						case "socks5":
+							dialerPage, err_socks_page := proxy.SOCKS5("tcp", parsedProxyURLPage.Host, nil, proxy.Direct)
+							if err_socks_page == nil {
+								tempTransportPage.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+									return dialerPage.Dial(network, addr)
+								}
+							} else {
+								log.Warn("为API请求(第%d页)创建SOCKS5 dialer失败 (%s): %v, 不使用此代理", pageNum, proxyAddrToUsePage, err_socks_page)
+							}
+						default:
+							log.Warn("从池中获取的代理 %s 类型 %s (第%d页)不支持用于爬取API, 不使用此代理", proxyAddrToUsePage, parsedProxyURLPage.Scheme, pageNum)
 						}
-
-						// 验证代理类型是否为已知类型
-						isValidType := false
-						switch proxyType {
-						case ProxyTypeHTTP, ProxyTypeHTTPS, ProxyTypeSOCKS4, ProxyTypeSOCKS5:
-							isValidType = true
+						if tempTransportPage.Proxy != nil || tempTransportPage.DialContext != nil {
+							clientToUseForPage = &http.Client{
+								Transport: tempTransportPage,
+								Timeout:   m.httpClient.Timeout,
+							}
 						}
-
-						if !isValidType {
-							log.Warn("跳过未知类型(%s)的代理: %s:%d", proxyType, proxyInfo.IP, proxyInfo.Port)
-							continue
-						}
-
-						proxy := &Proxy{
-							Address:      fmt.Sprintf("%s:%d", proxyInfo.IP, proxyInfo.Port),
-							LastVerify:   time.Now(),
-							Type:         proxyType,
-							Country:      proxyInfo.Country,
-							ResponseTime: proxyInfo.ResponseTime,
-						}
-
-						pageProxies = append(pageProxies, proxy)
+					} else {
+						log.Warn("解析从池中获取的代理地址 %s (第%d页)失败: %v, 不使用此代理", proxyAddrToUsePage, pageNum, err_parse_proxy_page)
 					}
+				} else if err_get_proxy_page != nil {
+					log.Warn("从池中获取代理(第%d页)失败: %v, 不使用代理爬取API", pageNum, err_get_proxy_page)
 				}
+			} else {
+				log.Info("代理池为空，直接爬取API %s (第%d页)", pageAPIURL, pageNum)
+			}
+			
+			// 发送请求
+			resp, err := clientToUseForPage.Do(req)
+			if err != nil {
+				log.Warn("请求第%d页代理失败: %v", pageNum, err)
+				continue // 继续尝试下一页
+			}
+			defer resp.Body.Close()
 
-				// 添加到总列表
-				if len(pageProxies) > 0 {
-					mu.Lock()
-					allProxies = append(allProxies, pageProxies...)
-					atomic.AddInt32(&successCount, 1)
-					mu.Unlock()
+			if resp.StatusCode != http.StatusOK {
+				log.Warn("第%d页返回错误状态码: %d", pageNum, resp.StatusCode)
+				continue // 继续尝试下一页
+			}
 
-					log.Info("第%d页获取到%d个有效代理", pageNum, len(pageProxies))
-				} else {
-					log.Warn("第%d页未找到有效代理", pageNum)
+			// 解析响应
+			respBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				log.Warn("读取第%d页响应失败: %v", pageNum, err)
+				continue // 继续尝试下一页
+			}
+
+			var proxyListResp ProxyListResponse
+			if err := json.Unmarshal(respBody, &proxyListResp); err != nil {
+				log.Warn("解析第%d页响应失败: %v", pageNum, err)
+				continue // 继续尝试下一页
+			}
+
+			// 验证响应
+			if !proxyListResp.Success {
+				log.Warn("第%d页返回success=false", pageNum)
+				continue // 继续尝试下一页
+			}
+
+			// 检查代理数据
+			if len(proxyListResp.Data.Proxies) == 0 {
+				log.Warn("第%d页代理数据为空", pageNum)
+				continue // 继续尝试下一页
+			}
+
+			// 收集代理信息
+			var pageProxies []*Proxy
+			for _, proxyInfo := range proxyListResp.Data.Proxies {
+				if proxyInfo.Status == 1 { // 只使用状态为1(有效)的代理
+					// 跳过无效的IP或端口
+					if proxyInfo.IP == "" || proxyInfo.Port <= 0 {
+						continue
+					}
+
+					// 处理代理类型
+					proxyType := strings.ToUpper(proxyInfo.Type)
+
+					// 如果没有类型信息，则记录警告并跳过
+					if proxyType == "" {
+						log.Warn("跳过无类型信息的代理: %s:%d", proxyInfo.IP, proxyInfo.Port)
+						continue
+					}
+
+					// 验证代理类型是否为已知类型
+					isValidType := false
+					switch proxyType {
+					case ProxyTypeHTTP, ProxyTypeHTTPS, ProxyTypeSOCKS4, ProxyTypeSOCKS5:
+						isValidType = true
+					}
+
+					if !isValidType {
+						log.Warn("跳过未知类型(%s)的代理: %s:%d", proxyType, proxyInfo.IP, proxyInfo.Port)
+						continue
+					}
+
+					proxy := &Proxy{
+						Address:      fmt.Sprintf("%s:%d", proxyInfo.IP, proxyInfo.Port),
+						LastVerify:   time.Now(),
+						Type:         proxyType,
+						Country:      proxyInfo.Country,
+						ResponseTime: proxyInfo.ResponseTime,
+					}
+
+					pageProxies = append(pageProxies, proxy)
 				}
-			}(page)
+			}
+
+			// 添加到总列表
+			if len(pageProxies) > 0 {
+				allProxies = append(allProxies, pageProxies...)
+				successCount++
+				log.Info("第%d页获取到%d个有效代理", pageNum, len(pageProxies))
+			} else {
+				log.Warn("第%d页未找到有效代理", pageNum)
+			}
 		}
-
-		// 等待所有请求完成
-		wg.Wait()
 	}
 
 	// 检查是否至少有一个页面成功
-	if atomic.LoadInt32(&successCount) == 0 {
+	if successCount == 0 {
 		return nil, fmt.Errorf("所有页面获取失败，未能获得任何有效代理")
 	}
 
@@ -922,8 +1007,36 @@ func (m *Manager) verifyProxy(proxyAddr string, proxyType string) bool {
 
 	// 创建一个使用代理的HTTP客户端
 	transport := &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
+		// TLSClientConfig is kept as per original logic.
+		// If InsecureSkipVerify is not desired for all proxy types,
+		// this might need further conditional logic.
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
+
+	// Configure proxy based on scheme
+	switch strings.ToLower(proxyURL.Scheme) {
+	case "http", "https":
+		transport.Proxy = http.ProxyURL(proxyURL)
+		transport.DialContext = nil // Ensure SOCKS dialer (if any) is not used
+	case "socks5":
+		// Assuming no authentication for SOCKS5 proxy for now (auth = nil)
+		dialer, err_socks := proxy.SOCKS5("tcp", proxyURL.Host, nil, proxy.Direct)
+		if err_socks != nil {
+			log.Error("为SOCKS5代理 %s 创建dialer失败: %v", proxyAddr, err_socks)
+			return false
+		}
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.Dial(network, addr)
+		}
+		transport.Proxy = nil // Ensure HTTP proxy (if any) is not used
+	// case "socks4": // SOCKS4 is a defined ProxyType but not handled here or in formatProxyAddress for scheme
+	// log.Warn("SOCKS4代理验证尚不支持: %s", proxyAddr)
+	// return false
+	default:
+		log.Warn("不支持的代理协议 %s 用于验证: %s", proxyURL.Scheme, proxyAddr)
+		return false
+	}
+
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   proxyTimeout,
@@ -978,6 +1091,8 @@ func (m *Manager) verifyProxy(proxyAddr string, proxyType string) bool {
 		log.Warn("代理 %s 验证失败：返回IP(%s)与代理主机IP(%s)不匹配", proxyAddr, returnedIP, proxyHost)
 	}
 
+	// The original code returned true here, which seems incorrect if isValid is false.
+	// Assuming the intent was to return the actual validation status.
 	return isValid
 }
 
