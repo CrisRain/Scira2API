@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"scira2api/pkg/constants"
 )
 
 // Client HTTP客户端包装器
@@ -13,8 +14,13 @@ type Client struct {
 
 // NewClient 创建新的HTTP客户端
 func NewClient() *Client {
+	client := resty.New()
+	
+	// 默认设置随机User-Agent
+	client.SetHeader("User-Agent", constants.GetRandomUserAgent())
+	
 	return &Client{
-		resty: resty.New(),
+		resty: client,
 	}
 }
 
@@ -50,6 +56,8 @@ func (c *Client) SetHeaders(headers map[string]string) *Client {
 
 // R 获取请求对象
 func (c *Client) R() *resty.Request {
+	// 每次请求前刷新随机User-Agent
+	c.resty.SetHeader("User-Agent", constants.GetRandomUserAgent())
 	return c.resty.R()
 }
 
@@ -60,11 +68,15 @@ func (c *Client) GetClient() *resty.Client {
 
 // Post 发送POST请求
 func (c *Client) Post(url string, body interface{}) (*resty.Response, error) {
+	// 确保每次请求使用新的随机User-Agent
+	c.resty.SetHeader("User-Agent", constants.GetRandomUserAgent())
 	return c.resty.R().SetBody(body).Post(url)
 }
 
 // Get 发送GET请求
 func (c *Client) Get(url string) (*resty.Response, error) {
+	// 确保每次请求使用新的随机User-Agent
+	c.resty.SetHeader("User-Agent", constants.GetRandomUserAgent())
 	return c.resty.R().Get(url)
 }
 

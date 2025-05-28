@@ -268,9 +268,11 @@ func (h *ChatHandler) executeRequest(ctx context.Context, request models.OpenAIC
 	internalModel := MapModelName(request.Model)
 	sciraRequest := request.ToSciraChatCompletionsRequest(internalModel, chatId, userId)
 
+	// 确保使用随机User-Agent
 	resp, err := h.client.R().
 		SetContext(ctx).
 		SetHeader("Referer", h.config.Client.BaseURL).
+		SetHeader("User-Agent", constants.GetRandomUserAgent()).
 		SetBody(sciraRequest).
 		Post(constants.APISearchEndpoint)
 
