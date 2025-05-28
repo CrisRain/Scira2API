@@ -26,23 +26,23 @@ const (
 	// 代理API基础URL
 	proxyAPIBaseURL = "https://proxy.scdn.io/api/proxy_list.php"
 	// 验证URL (只使用HTTPS版本)
-	proxyVerifyURL  = "https://ip.gs/"
-	proxyTimeout        = 10 * time.Second
-	maxRetries          = 3
-	retryDelay          = 2 * time.Second
+	proxyVerifyURL = "https://ip.gs/"
+	proxyTimeout   = 10 * time.Second
+	maxRetries     = 3
+	retryDelay     = 2 * time.Second
 
 	// 代理池相关常量
 	minPoolSize      = 20              // 代理池最小数量，低于此值时触发刷新
 	refreshInterval  = 5 * time.Minute // 定时刷新间隔
-	validateInterval = 2 * time.Minute // 代理验证间隔
+	validateInterval = 1 * time.Minute // 代理验证间隔
 
 	// 代理池持久化
 	proxyPoolFile = "pool/proxy_pool.json" // 代理池持久化文件
 	maxPagesFetch = 100                    // 从API获取的最大页数
-	
+
 	// 速率限制
-	requestsPerSecond = 2                  // 每秒请求数限制
-	burstLimit        = 5                  // 突发请求数限制
+	requestsPerSecond = 10 // 每秒请求数限制
+	burstLimit        = 20 // 突发请求数限制
 )
 
 // 代理类型
@@ -139,7 +139,7 @@ func (m *Manager) initProxyPool() {
 
 	// 先尝试从文件加载代理池
 	loaded := m.loadProxyPoolFromFile()
-	
+
 	// 添加本地代理到代理池
 	m.addLocalProxies()
 
@@ -524,7 +524,7 @@ func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
 	// 使用通道控制并发数
 	maxConcurrent := 20 // 最大并发验证数量
 	sem := make(chan struct{}, maxConcurrent)
-	
+
 	var validProxies []*Proxy
 	var wg sync.WaitGroup
 	var mu sync.Mutex // 保护validProxies
@@ -533,13 +533,13 @@ func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
 	for _, proxy := range proxyList {
 		wg.Add(1)
 		sem <- struct{}{} // 获取信号量，限制并发数
-		
+
 		go func(p *Proxy) {
 			defer func() {
 				<-sem // 释放信号量
 				wg.Done()
 			}()
-			
+
 			// 将代理类型信息传递给verifyProxy函数
 			if m.verifyProxy(p.Address, p.Type) {
 				mu.Lock()
@@ -565,9 +565,9 @@ func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
 	validCount := len(validProxies)
 	totalCount := len(proxyList)
 	successRate := float64(validCount) / float64(totalCount) * 100
-	
+
 	log.Info("代理验证完成，有效代理数量: %d/%d (%.1f%%)", validCount, totalCount, successRate)
-	
+
 	return validProxies, nil
 }
 
@@ -586,7 +586,7 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 
 	// 获取多页代理数据
 	var allProxies []*Proxy
-	
+
 	// 创建速率限制器
 	rateLimiter := make(chan struct{}, burstLimit)
 	// 启动限速协程
@@ -609,7 +609,7 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 			}
 		}
 	}()
-	
+
 	// 初始化限速器，预先填充burstLimit个令牌
 	for i := 0; i < burstLimit; i++ {
 		select {
@@ -624,10 +624,10 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 
 	// 先获取第一页以确定总页数
 	log.Info("先获取第一页代理以确定总页数...")
-	
+
 	// 获取限速令牌
 	<-rateLimiter
-	
+
 	// 构建第一页请求参数
 	params := map[string]string{
 		"page":     "1",
@@ -673,7 +673,7 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 	} else if totalPages > maxPagesFetch {
 		totalPages = maxPagesFetch // 限制最大页数
 	}
-	
+
 	log.Info("API返回总页数: %d, 将爬取页数: %d", proxyListResp.Data.Pagination.TotalPages, totalPages)
 
 	// 处理第一页数据
@@ -687,12 +687,12 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 			case ProxyTypeHTTP, ProxyTypeHTTPS, ProxyTypeSOCKS4, ProxyTypeSOCKS5:
 				isValidType = true
 			}
-			
+
 			if !isValidType {
 				log.Warn("跳过未知类型(%s)的代理: %s:%d", proxyType, proxyInfo.IP, proxyInfo.Port)
 				continue
 			}
-			
+
 			proxy := &Proxy{
 				Address:      fmt.Sprintf("%s:%d", proxyInfo.IP, proxyInfo.Port),
 				LastVerify:   time.Now(),
@@ -703,7 +703,7 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 			firstPageProxies = append(firstPageProxies, proxy)
 		}
 	}
-	
+
 	// 添加第一页数据到结果
 	mu.Lock()
 	allProxies = append(allProxies, firstPageProxies...)
@@ -711,7 +711,7 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 		atomic.AddInt32(&successCount, 1)
 	}
 	mu.Unlock()
-	
+
 	log.Info("第1页获取到%d个有效代理", len(firstPageProxies))
 
 	// 如果有多页，并发爬取剩余页面（从第2页开始）
@@ -720,7 +720,7 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 			wg.Add(1)
 			go func(pageNum int) {
 				defer wg.Done()
-				
+
 				// 请求前获取限速令牌
 				log.Debug("等待获取页面%d的限速令牌", pageNum)
 				<-rateLimiter
@@ -729,7 +729,7 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 				// 构建请求URL及参数
 				params := map[string]string{
 					"page":     fmt.Sprintf("%d", pageNum),
-					"per_page": "100", // 每页获取100个代理
+					"per_page": "100",    // 每页获取100个代理
 					"type":     "socks5", // 仅获取SOCKS5类型的代理
 				}
 
@@ -863,7 +863,7 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 
 	log.Info("共获取到 %d 个有效代理，类型分布: %v", len(allProxies), typeCount)
 	log.Debug("国家/地区分布: %v", countryCount)
-	
+
 	return allProxies, nil
 }
 
@@ -959,7 +959,7 @@ func (m *Manager) verifyProxy(proxyAddr string, proxyType string) bool {
 	} else {
 		log.Warn("代理 %s 验证失败：返回IP(%s)与代理主机IP(%s)不匹配", proxyAddr, returnedIP, proxyHost)
 	}
-	
+
 	return isValid
 }
 
@@ -987,7 +987,7 @@ func (m *Manager) ForceRefreshProxy() (string, error) {
 				validProxies = append(validProxies, p)
 			}
 		}
-		
+
 		if len(validProxies) > 0 {
 			// 从有效代理中随机选择一个
 			tempProxy = validProxies[rand.Intn(len(validProxies))]
@@ -1043,7 +1043,7 @@ func (m *Manager) ForceRefreshProxy() (string, error) {
 		sort.Slice(candidates, func(i, j int) bool {
 			return candidates[i].ResponseTime < candidates[j].ResponseTime
 		})
-		
+
 		// 从响应时间最快的前三个中随机选择一个（如果有三个的话）
 		candidateCount := len(candidates)
 		if candidateCount > 3 {

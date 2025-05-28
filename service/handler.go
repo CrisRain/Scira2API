@@ -56,7 +56,7 @@ func NewChatHandler(cfg *config.Config) *ChatHandler {
 	var proxyManager *proxy.Manager
 	if cfg.Client.DynamicProxy {
 		proxyManager = proxy.NewManager()
-		log.Info("动态SOCKS5代理池已启用")
+		log.Info("动态代理池已启用（支持HTTP/SOCKS4/SOCKS5代理）")
 	}
 	
 	// 创建统一的resty HTTP客户端
@@ -129,38 +129,59 @@ func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *resty.Cl
 	client.SetRetryWaitTime(constants.RetryDelay)
 	client.SetRetryMaxWaitTime(constants.RetryDelay * 5)
 
-	// 代理配置优先级：动态SOCKS5代理 > 静态SOCKS5代理 > 静态HTTP代理
+	// 代理配置优先级：动态代理 > 静态SOCKS5代理 > 静态HTTP代理
 	if cfg.Client.DynamicProxy && proxyManager != nil {
 		// 为每个请求设置前置处理器，动态获取代理
 		client.OnBeforeRequest(func(c *resty.Client, req *resty.Request) error {
 			proxyAddr, err := proxyManager.GetProxy()
 			if err != nil {
-				log.Warn("无法获取动态SOCKS5代理，将直接连接: %v", err)
+				log.Warn("无法获取动态代理，将使用直接连接: %v", err)
 				c.SetProxy("") // 清除之前可能设置的代理
 				return nil // 继续请求，但不使用代理
 			}
 			
-			// 确保代理地址有正确的协议前缀
-			if !strings.HasPrefix(proxyAddr, "socks5://") {
-				proxyAddr = "socks5://" + proxyAddr
+			// 不再强制添加协议前缀，因为GetProxy现在已经返回带协议前缀的地址
+			// formatProxyAddress确保了返回的地址已经有正确的协议前缀：
+			// - HTTP/HTTPS代理会带http://前缀
+			// - SOCKS4代理会带socks4://前缀
+			// - SOCKS5代理会带socks5://前缀
+			
+			// 获取代理类型（从URL中提取协议）
+			proxyType := "unknown"
+			if strings.HasPrefix(proxyAddr, "http://") {
+				proxyType = "HTTP"
+			} else if strings.HasPrefix(proxyAddr, "socks4://") {
+				proxyType = "SOCKS4"
+			} else if strings.HasPrefix(proxyAddr, "socks5://") {
+				proxyType = "SOCKS5"
 			}
 			
-			log.Info("对请求 %s 使用动态SOCKS5代理: %s", req.URL, proxyAddr)
+			log.Info("对请求 %s 使用动态代理(%s): %s", req.URL, proxyType, proxyAddr)
 			c.SetProxy(proxyAddr)
 			return nil
 		})
 	} else if cfg.Client.Socks5Proxy != "" {
 		// 使用静态SOCKS5代理
 		proxyAddr := cfg.Client.Socks5Proxy
-		if !strings.HasPrefix(proxyAddr, "socks5://") {
+		if !strings.HasPrefix(proxyAddr, "socks5://") &&
+		   !strings.HasPrefix(proxyAddr, "http://") &&
+		   !strings.HasPrefix(proxyAddr, "https://") &&
+		   !strings.HasPrefix(proxyAddr, "socks4://") {
+			// 默认使用SOCKS5协议
 			proxyAddr = "socks5://" + proxyAddr
 		}
 		log.Info("使用静态SOCKS5代理: %s", proxyAddr)
 		client.SetProxy(proxyAddr)
 	} else if cfg.Client.HttpProxy != "" {
 		// 使用静态HTTP代理
-		log.Info("使用静态HTTP代理: %s", cfg.Client.HttpProxy)
-		client.SetProxy(cfg.Client.HttpProxy)
+		proxyAddr := cfg.Client.HttpProxy
+		if !strings.HasPrefix(proxyAddr, "http://") &&
+		   !strings.HasPrefix(proxyAddr, "https://") {
+			// 默认使用HTTP协议
+			proxyAddr = "http://" + proxyAddr
+		}
+		log.Info("使用静态HTTP代理: %s", proxyAddr)
+		client.SetProxy(proxyAddr)
 	}
 
 	return client
