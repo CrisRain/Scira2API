@@ -2,6 +2,7 @@ package service
 
 import (
 	"net/http"
+	"runtime/debug"
 	"scira2api/log"
 	"scira2api/models"
 
@@ -10,6 +11,16 @@ import (
 
 // ModelGetHandler 处理获取模型列表的请求
 func (h *ChatHandler) ModelGetHandler(c *gin.Context) {
+	// 增加调试信息 - 记录请求来源
+	clientIP := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+	referer := c.Request.Referer()
+	log.Debug("收到models请求: IP=%s, User-Agent=%s, Referer=%s", clientIP, userAgent, referer)
+	
+	// 记录调用堆栈，帮助确定调用来源
+	stack := string(debug.Stack())
+	log.Debug("ModelGetHandler调用堆栈: %s", stack)
+	
 	// 尝试从缓存获取模型列表
 	if h.responseCache != nil && h.responseCache.IsEnabled() {
 		cachedModels, found := h.responseCache.GetModelCache()
