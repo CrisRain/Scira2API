@@ -89,5 +89,6 @@ data.db
 
 .cursor/
 memory-bank/
+pool/
 
 final_review_gate.py
