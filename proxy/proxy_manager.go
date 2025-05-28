@@ -729,8 +729,8 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 				// 构建请求URL及参数
 				params := map[string]string{
 					"page":     fmt.Sprintf("%d", pageNum),
-					"per_page": "100",    // 每页获取100个代理
-					"type":     "socks5", // 仅获取SOCKS5类型的代理
+					"per_page": "100", // 每页获取100个代理
+					"type":     "",    // 仅获取SOCKS5类型的代理
 				}
 
 				// 发送请求，每个请求使用新的随机UA
