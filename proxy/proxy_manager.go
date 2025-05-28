@@ -217,6 +217,7 @@ func (m *Manager) startPoolMaintenance() {
 				log.Info("停止代理验证任务")
 				return
 			case <-ticker.C:
+				// 验证代理池，刷新会在validateProxies内部异步执行
 				m.validateProxies()
 			}
 		}
@@ -403,23 +404,47 @@ func (m *Manager) refreshProxyPool() error {
 		return fmt.Errorf("未获取到有效代理")
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 合并新旧代理池，保留不重复的代理
-	existingProxies := make(map[string]bool)
+	// 使用读写锁保护代理池更新，减少锁持有时间
+	// 先复制当前代理池中的地址到map中
+	m.mu.RLock()
+	existingProxies := make(map[string]bool, len(m.proxyPool))
 	for _, p := range m.proxyPool {
 		existingProxies[p.Address] = true
 	}
+	m.mu.RUnlock()
 
-	// 添加新的不重复代理
+	// 筛选出不重复的新代理
+	var uniqueNewProxies []*Proxy
 	for _, newProxy := range newProxies {
 		if !existingProxies[newProxy.Address] {
-			m.proxyPool = append(m.proxyPool, newProxy)
+			uniqueNewProxies = append(uniqueNewProxies, newProxy)
 		}
 	}
 
-	log.Info("代理池刷新完成，当前代理数量: %d", len(m.proxyPool))
+	// 只在需要添加新代理时获取写锁
+	if len(uniqueNewProxies) > 0 {
+		m.mu.Lock()
+		// 再次检查是否有重复代理，因为在我们获取锁之前可能有其他协程修改了代理池
+		currentAddresses := make(map[string]bool)
+		for _, p := range m.proxyPool {
+			currentAddresses[p.Address] = true
+		}
+
+		// 添加真正不重复的代理
+		var addedCount int
+		for _, newProxy := range uniqueNewProxies {
+			if !currentAddresses[newProxy.Address] {
+				m.proxyPool = append(m.proxyPool, newProxy)
+				addedCount++
+			}
+		}
+		poolSize := len(m.proxyPool)
+		m.mu.Unlock()
+
+		log.Info("代理池刷新完成，添加了 %d 个新代理，当前代理数量: %d", addedCount, poolSize)
+	} else {
+		log.Info("代理池刷新完成，没有新的代理添加")
+	}
 
 	// 保存更新后的代理池到文件
 	go m.saveProxyPoolToFile()
@@ -432,9 +457,17 @@ func (m *Manager) validateProxies() {
 	log.Info("开始验证代理池中的代理...")
 
 	m.mu.RLock()
-	proxiesToValidate := make([]*Proxy, len(m.proxyPool))
+	poolSize := len(m.proxyPool)
+	proxiesToValidate := make([]*Proxy, poolSize)
 	copy(proxiesToValidate, m.proxyPool)
 	m.mu.RUnlock()
+
+	// 检查是否需要刷新代理池，无论验证结果如何
+	// 将刷新代理池的操作放在验证之前并异步执行，实现同步进行
+	if poolSize < minPoolSize {
+		log.Info("代理池数量 (%d) 低于最小值 (%d)，触发异步刷新", poolSize, minPoolSize)
+		go m.refreshProxyPool()
+	}
 
 	var validProxies []*Proxy
 	var wg sync.WaitGroup
@@ -445,7 +478,6 @@ func (m *Manager) validateProxies() {
 		wg.Add(1)
 		go func(p *Proxy) {
 			defer wg.Done()
-			// 这里依然从proxyPool中查找类型，因为这些代理已经在池中
 			if m.verifyProxy(p.Address, p.Type) {
 				mu.Lock()
 				p.LastVerify = time.Now()
@@ -470,19 +502,13 @@ func (m *Manager) validateProxies() {
 
 	m.mu.Lock()
 	m.proxyPool = validProxies
-	poolSize := len(m.proxyPool)
+	newPoolSize := len(m.proxyPool)
 	m.mu.Unlock()
 
-	log.Info("代理验证完成，有效代理数量: %d", poolSize)
+	log.Info("代理验证完成，有效代理数量: %d", newPoolSize)
 
-	// 如果代理池数量低于最小值，触发刷新
-	if poolSize < minPoolSize {
-		log.Info("代理池数量 (%d) 低于最小值 (%d)，触发刷新", poolSize, minPoolSize)
-		go m.refreshProxyPool()
-	} else {
-		// 保存更新后的代理池到文件
-		go m.saveProxyPoolToFile()
-	}
+	// 无论代理池数量如何，都保存更新后的代理池到文件
+	go m.saveProxyPoolToFile()
 }
 
 // fetchAndVerifyProxies 批量获取并验证代理
@@ -495,6 +521,10 @@ func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
 
 	log.Info("从API获取到 %d 个代理，开始验证...", len(proxyList))
 
+	// 使用通道控制并发数
+	maxConcurrent := 20 // 最大并发验证数量
+	sem := make(chan struct{}, maxConcurrent)
+	
 	var validProxies []*Proxy
 	var wg sync.WaitGroup
 	var mu sync.Mutex // 保护validProxies
@@ -502,25 +532,42 @@ func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
 	// 并发验证代理
 	for _, proxy := range proxyList {
 		wg.Add(1)
+		sem <- struct{}{} // 获取信号量，限制并发数
+		
 		go func(p *Proxy) {
-			defer wg.Done()
+			defer func() {
+				<-sem // 释放信号量
+				wg.Done()
+			}()
+			
 			// 将代理类型信息传递给verifyProxy函数
 			if m.verifyProxy(p.Address, p.Type) {
 				mu.Lock()
+				p.LastVerify = time.Now() // 更新验证时间
+				p.FailCount = 0           // 重置失败计数
 				validProxies = append(validProxies, p)
 				mu.Unlock()
+				log.Debug("代理验证成功: %s (类型: %s)", p.Address, p.Type)
+			} else {
+				log.Debug("代理验证失败: %s (类型: %s)", p.Address, p.Type)
 			}
 		}(proxy)
 	}
 
 	wg.Wait()
+	close(sem)
 
 	// 按响应时间排序，优先使用响应快的代理
 	sort.Slice(validProxies, func(i, j int) bool {
 		return validProxies[i].ResponseTime < validProxies[j].ResponseTime
 	})
 
-	log.Info("代理验证完成，有效代理数量: %d/%d", len(validProxies), len(proxyList))
+	validCount := len(validProxies)
+	totalCount := len(proxyList)
+	successRate := float64(validCount) / float64(totalCount) * 100
+	
+	log.Info("代理验证完成，有效代理数量: %d/%d (%.1f%%)", validCount, totalCount, successRate)
+	
 	return validProxies, nil
 }
 
@@ -584,8 +631,8 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 	// 构建第一页请求参数
 	params := map[string]string{
 		"page":     "1",
-		"per_page": "100", // 每页获取100个代理
-		"type":     "socks5", // 仅获取SOCKS5类型的代理
+		"per_page": "100",
+		"type":     "socks5",
 	}
 
 	// 发送请求获取第一页
@@ -851,9 +898,11 @@ func (m *Manager) verifyProxy(proxyAddr string, proxyType string) bool {
 		return false
 	}
 
-	// 创建一个使用SOCKS5代理的HTTP客户端
-	// 注意：resty的SetProxy方法期望的是 "http://proxy_ip:proxy_port" 或 "socks5://proxy_ip:proxy_port"
-	// 但标准库的http.Transport需要一个函数来返回代理URL
+	// 获取代理主机IP
+	proxyHost := proxyURL.Hostname()
+	log.Debug("代理主机IP: %s", proxyHost)
+
+	// 创建一个使用代理的HTTP客户端
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(proxyURL),
 	}
@@ -896,30 +945,83 @@ func (m *Manager) verifyProxy(proxyAddr string, proxyType string) bool {
 		return false
 	}
 
-	ip := strings.TrimSpace(string(body))
-	// 验证返回的IP是否与代理IP的地址部分匹配 (不含端口)
-	// 这是一个基本验证，因为代理服务器本身可能有多层NAT
-	// 更可靠的验证是检查IP是否与本机公网IP不同
-	proxyHost := proxyURL.Hostname()
-	if ip == "" {
+	// 获取验证返回的IP
+	returnedIP := strings.TrimSpace(string(body))
+	if returnedIP == "" {
 		log.Warn("通过代理 %s 验证IP返回空", proxyAddr)
 		return false
 	}
 
-	log.Info("通过代理 %s 验证IP成功，返回IP: %s (代理主机: %s)", proxyAddr, ip, proxyHost)
-	// 这里可以添加更复杂的验证逻辑，例如检查返回的IP是否与代理服务器的IP地址段匹配，
-	// 或者与本机公网IP不同。目前简单认为能成功请求并获得IP即为有效。
-	return true
+	// 核心验证逻辑修改：当返回的IP与代理主机IP相同时，视为代理有效
+	isValid := returnedIP == proxyHost
+	if isValid {
+		log.Info("代理 %s 验证成功：返回IP(%s)与代理主机IP匹配", proxyAddr, returnedIP)
+	} else {
+		log.Warn("代理 %s 验证失败：返回IP(%s)与代理主机IP(%s)不匹配", proxyAddr, returnedIP, proxyHost)
+	}
+	
+	return isValid
 }
 
 // ForceRefreshProxy 强制刷新代理池并返回一个新代理
 func (m *Manager) ForceRefreshProxy() (string, error) {
 	log.Info("正在强制刷新代理池...")
 
-	if err := m.refreshProxyPool(); err != nil {
-		return "", fmt.Errorf("强制刷新代理池失败: %w", err)
+	// 启动异步刷新
+	refreshDone := make(chan struct{})
+	var refreshErr error
+	go func() {
+		defer close(refreshDone)
+		refreshErr = m.refreshProxyPool()
+	}()
+
+	// 获取当前代理池中的一个代理作为临时使用
+	m.mu.RLock()
+	currentPoolSize := len(m.proxyPool)
+	var tempProxy *Proxy
+	if currentPoolSize > 0 {
+		// 优先选择最近验证成功且失败次数为0的代理
+		validProxies := make([]*Proxy, 0)
+		for _, p := range m.proxyPool {
+			if p.FailCount == 0 {
+				validProxies = append(validProxies, p)
+			}
+		}
+		
+		if len(validProxies) > 0 {
+			// 从有效代理中随机选择一个
+			tempProxy = validProxies[rand.Intn(len(validProxies))]
+		} else if currentPoolSize > 0 {
+			// 如果没有验证成功的代理，从所有代理中随机选择
+			tempProxy = m.proxyPool[rand.Intn(currentPoolSize)]
+		}
+	}
+	m.mu.RUnlock()
+
+	// 等待刷新完成或超时
+	select {
+	case <-refreshDone:
+		if refreshErr != nil {
+			log.Warn("代理池刷新失败: %v, 尝试使用现有代理", refreshErr)
+			// 如果刷新失败但有临时代理，则使用临时代理
+			if tempProxy != nil {
+				formattedAddress := formatProxyAddress(tempProxy.Address, tempProxy.Type)
+				log.Info("返回现有代理: %s (类型: %s)", formattedAddress, tempProxy.Type)
+				return formattedAddress, nil
+			}
+			return "", fmt.Errorf("强制刷新代理池失败: %w", refreshErr)
+		}
+	case <-time.After(5 * time.Second):
+		log.Warn("代理池刷新超时，尝试使用现有代理")
+		// 如果刷新超时但有临时代理，则使用临时代理
+		if tempProxy != nil {
+			formattedAddress := formatProxyAddress(tempProxy.Address, tempProxy.Type)
+			log.Info("返回现有代理: %s (类型: %s)", formattedAddress, tempProxy.Type)
+			return formattedAddress, nil
+		}
 	}
 
+	// 从刷新后的代理池中获取代理
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -927,15 +1029,38 @@ func (m *Manager) ForceRefreshProxy() (string, error) {
 		return "", fmt.Errorf("代理池为空")
 	}
 
-	// 随机选择一个代理
-	randIndex := rand.Intn(len(m.proxyPool))
-	proxy := m.proxyPool[randIndex]
-	proxyType := proxy.Type
-	address := proxy.Address
+	// 筛选验证成功的代理
+	candidates := make([]*Proxy, 0)
+	for _, p := range m.proxyPool {
+		if p.FailCount == 0 && !p.LastVerify.IsZero() {
+			candidates = append(candidates, p)
+		}
+	}
+
+	var proxy *Proxy
+	if len(candidates) > 0 {
+		// 按响应时间排序，优先选择响应快的代理
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].ResponseTime < candidates[j].ResponseTime
+		})
+		
+		// 从响应时间最快的前三个中随机选择一个（如果有三个的话）
+		candidateCount := len(candidates)
+		if candidateCount > 3 {
+			candidateCount = 3
+		}
+		randIndex := rand.Intn(candidateCount)
+		proxy = candidates[randIndex]
+	} else {
+		// 如果没有满足条件的候选代理，则从整个池中随机选择
+		randIndex := rand.Intn(len(m.proxyPool))
+		proxy = m.proxyPool[randIndex]
+	}
 
 	// 根据代理类型添加协议前缀
-	formattedAddress := formatProxyAddress(address, proxyType)
+	formattedAddress := formatProxyAddress(proxy.Address, proxy.Type)
 
-	log.Info("强制刷新后获取到代理: %s (类型: %s)", formattedAddress, proxyType)
+	log.Info("强制刷新后获取到代理: %s (类型: %s, 响应时间: %dms)",
+		formattedAddress, proxy.Type, proxy.ResponseTime)
 	return formattedAddress, nil
 }
