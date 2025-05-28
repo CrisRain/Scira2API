@@ -805,18 +805,17 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 	}
 
 	// 记录代理统计信息
-	if len(allProxies) > 0 {
-		typeCount := make(map[string]int)
-		countryCount := make(map[string]int)
+	// 这里不需要检查len > 0，因为前面已经检查过了，这里只是记录统计信息
+	typeCount := make(map[string]int)
+	countryCount := make(map[string]int)
 
-		for _, p := range allProxies {
-			typeCount[p.Type]++
-			countryCount[p.Country]++
-		}
-
-		log.Info("共获取到 %d 个有效代理，类型分布: %v", len(allProxies), typeCount)
-		log.Debug("国家/地区分布: %v", countryCount)
+	for _, p := range allProxies {
+		typeCount[p.Type]++
+		countryCount[p.Country]++
 	}
+
+	log.Info("共获取到 %d 个有效代理，类型分布: %v", len(allProxies), typeCount)
+	log.Debug("国家/地区分布: %v", countryCount)
 	
 	return allProxies, nil
 }
