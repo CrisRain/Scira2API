@@ -122,7 +122,7 @@ func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *resty.Cl
 		SetHeader("Content-Type", constants.ContentTypeJSON).
 		SetHeader("Accept", constants.AcceptAll).
 		SetHeader("Origin", cfg.Client.BaseURL).
-		SetHeader("User-Agent", constants.UserAgent).
+		SetHeader("User-Agent", constants.GetRandomUserAgent()).
 		SetRetryCount(cfg.Client.Retry - 1) // SetRetryCount是额外重试次数，所以减1
 
 	// 设置重试等待时间

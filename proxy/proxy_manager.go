@@ -14,15 +14,15 @@ import (
 
 	"github.com/go-resty/resty/v2"
 	"scira2api/log"
+	"scira2api/pkg/constants"
 )
 
 const (
-	proxyAPIURL      = "https://proxy.scdn.io/api/get_proxy.php?protocol=socks5&count=100"
+	proxyAPIURL      = "https://proxy.scdn.io/api/proxy_list.php?page=1&per_page=100&type=&country="
 	proxyVerifyURL   = "https://ip.gs/"
 	proxyTimeout     = 10 * time.Second
 	maxRetries       = 3
 	retryDelay       = 2 * time.Second
-	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 	
 	// 代理池相关常量
 	minPoolSize      = 20      // 代理池最小数量，低于此值时触发刷新
@@ -30,13 +30,28 @@ const (
 	validateInterval = 2 * time.Minute  // 代理验证间隔
 )
 
-// ProxyInfo API响应结构
-type ProxyInfo struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+// ProxyListResponse API响应结构
+type ProxyListResponse struct {
+	Success bool `json:"success"`
 	Data    struct {
-		Proxies []string `json:"proxies"`
-		Count   int      `json:"count"`
+		Proxies []struct {
+			ID           int    `json:"id"`
+			IP           string `json:"ip"`
+			Port         int    `json:"port"`
+			Type         string `json:"type"`
+			Country      string `json:"country"`
+			ResponseTime int    `json:"response_time"`
+			LastCheck    string `json:"last_check"`
+			Status       int    `json:"status"`
+		} `json:"proxies"`
+		Pagination struct {
+			CurrentPage    int `json:"current_page"`
+			PerPage        int `json:"per_page"`
+			TotalPages     int `json:"total_pages"`
+			TotalFiltered  int `json:"total_filtered"`
+			TotalActive    int `json:"total_active"`
+			Total          int `json:"total"`
+		} `json:"pagination"`
 	} `json:"data"`
 }
 
@@ -64,7 +79,7 @@ func NewManager() *Manager {
 		SetRetryCount(maxRetries).
 		SetRetryWaitTime(retryDelay).
 		SetRetryMaxWaitTime(20*time.Second).
-		SetHeader("User-Agent", defaultUserAgent)
+		SetHeader("User-Agent", constants.GetRandomUserAgent())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	
@@ -315,8 +330,11 @@ func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
 	return validProxies, nil
 }
 
-// fetchProxiesFromAPI 从指定的API批量获取SOCKS5代理
+// fetchProxiesFromAPI 从指定的API批量获取代理
 func (m *Manager) fetchProxiesFromAPI() ([]string, error) {
+	// 设置随机User-Agent
+	m.httpClient.SetHeader("User-Agent", constants.GetRandomUserAgent())
+	
 	resp, err := m.httpClient.R().Get(proxyAPIURL)
 	if err != nil {
 		return nil, fmt.Errorf("请求代理API失败: %w", err)
@@ -326,16 +344,29 @@ func (m *Manager) fetchProxiesFromAPI() ([]string, error) {
 		return nil, fmt.Errorf("代理API返回错误状态码: %d, body: %s", resp.StatusCode(), resp.String())
 	}
 
-	var proxyInfo ProxyInfo
-	if err := json.Unmarshal(resp.Body(), &proxyInfo); err != nil {
+	var proxyListResp ProxyListResponse
+	if err := json.Unmarshal(resp.Body(), &proxyListResp); err != nil {
 		return nil, fmt.Errorf("解析代理API响应失败: %w, body: %s", err, resp.String())
 	}
 
-	if proxyInfo.Code != 200 || proxyInfo.Data.Count == 0 || len(proxyInfo.Data.Proxies) == 0 {
-		return nil, fmt.Errorf("代理API返回无效数据: %+v", proxyInfo)
+	if !proxyListResp.Success || len(proxyListResp.Data.Proxies) == 0 {
+		return nil, fmt.Errorf("代理API返回无效数据")
 	}
 
-	return proxyInfo.Data.Proxies, nil
+	// 将代理信息转换为 "IP:端口" 格式
+	var proxyList []string
+	for _, proxy := range proxyListResp.Data.Proxies {
+		if proxy.Status == 1 { // 只使用状态为1(有效)的代理
+			proxyAddr := fmt.Sprintf("%s:%d", proxy.IP, proxy.Port)
+			proxyList = append(proxyList, proxyAddr)
+		}
+	}
+
+	if len(proxyList) == 0 {
+		return nil, fmt.Errorf("未找到有效的代理")
+	}
+
+	return proxyList, nil
 }
 
 // verifyProxy 验证SOCKS5代理是否有效
@@ -365,7 +396,7 @@ func (m *Manager) verifyProxy(proxyAddr string) bool {
 		log.Error("创建验证请求失败: %v", err)
 		return false
 	}
-	req.Header.Set("User-Agent", defaultUserAgent) // 添加User-Agent
+	req.Header.Set("User-Agent", constants.GetRandomUserAgent()) // 添加随机User-Agent
 
 	resp, err := client.Do(req)
 	if err != nil {
