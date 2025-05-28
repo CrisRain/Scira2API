@@ -18,8 +18,6 @@ import (
 
 	"scira2api/log"
 	"scira2api/pkg/constants"
-
-	"github.com/go-resty/resty/v2"
 )
 
 const (
@@ -32,9 +30,9 @@ const (
 	retryDelay     = 2 * time.Second
 
 	// 代理池相关常量
-	minPoolSize      = 20              // 代理池最小数量，低于此值时触发刷新
-	refreshInterval  = 5 * time.Minute // 定时刷新间隔
-	validateInterval = 1 * time.Minute // 代理验证间隔
+	minPoolSize      = 20               // 代理池最小数量，低于此值时触发刷新
+	refreshInterval  = 60 * time.Minute // 定时刷新间隔
+	validateInterval = 5 * time.Minute  // 代理验证间隔
 
 	// 代理池持久化
 	proxyPoolFile = "pool/proxy_pool.json" // 代理池持久化文件
@@ -97,7 +95,7 @@ type Proxy struct {
 
 // Manager 负责管理SOCKS5代理池
 type Manager struct {
-	httpClient   *resty.Client
+	httpClient   *http.Client
 	proxyPool    []*Proxy     // 代理池
 	mu           sync.RWMutex // 保护代理池的互斥锁
 	ctx          context.Context
@@ -108,12 +106,16 @@ type Manager struct {
 
 // NewManager 创建一个新的代理管理器实例并启动代理池维护
 func NewManager() *Manager {
-	client := resty.New().
-		SetTimeout(proxyTimeout).
-		SetRetryCount(maxRetries).
-		SetRetryWaitTime(retryDelay).
-		SetRetryMaxWaitTime(20*time.Second).
-		SetHeader("User-Agent", constants.GetRandomUserAgent())
+	// 创建标准库HTTP客户端
+	client := &http.Client{
+		Timeout: proxyTimeout,
+		Transport: &http.Transport{
+			MaxIdleConns:        10,
+			IdleConnTimeout:     30 * time.Second,
+			DisableCompression:  true,
+			TLSHandshakeTimeout: 10 * time.Second,
+		},
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -347,9 +349,12 @@ func formatProxyAddress(address, proxyType string) string {
 	}
 
 	switch proxyType {
-	case ProxyTypeHTTP, ProxyTypeHTTPS:
-		// HTTP和HTTPS类型的代理都使用http://前缀，它们可以处理http和https请求
+	case ProxyTypeHTTP:
+		// HTTP代理使用http://前缀
 		return "http://" + address
+	case ProxyTypeHTTPS:
+		// HTTPS代理使用https://前缀
+		return "https://" + address
 	case ProxyTypeSOCKS4:
 		return "socks4://" + address
 	case ProxyTypeSOCKS5:
@@ -579,9 +584,8 @@ func (m *Manager) addLocalProxies() {
 
 // fetchProxiesFromAPI 从指定的API批量获取代理
 func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
-	// 设置随机User-Agent
+	// 设置随机User-Agent (将在请求中单独设置)
 	randomUA := constants.GetRandomUserAgent()
-	m.httpClient.SetHeader("User-Agent", randomUA)
 	log.Info("获取代理使用UA: %s", randomUA)
 
 	// 获取多页代理数据
@@ -628,32 +632,39 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 	// 获取限速令牌
 	<-rateLimiter
 
-	// 构建第一页请求参数
-	params := map[string]string{
-		"page":     "1",
-		"per_page": "100",
-		"type":     "socks5",
-	}
-
 	// 发送请求获取第一页
 	currUA := constants.GetRandomUserAgent()
-	resp, err := m.httpClient.R().
-		SetQueryParams(params).
-		SetHeader("User-Agent", currUA).
-		Get(proxyAPIBaseURL)
 
+	// 构建请求
+	url := proxyAPIBaseURL + "?page=1&per_page=100&type=socks5"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Warn("创建第1页代理请求失败: %v", err)
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", currUA)
+
+	// 发送请求
+	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		log.Warn("请求第1页代理失败: %v", err)
 		return nil, err
 	}
+	defer resp.Body.Close()
 
-	if resp.StatusCode() != http.StatusOK {
-		log.Warn("第1页返回错误状态码: %d", resp.StatusCode())
-		return nil, fmt.Errorf("API返回错误状态码: %d", resp.StatusCode())
+	if resp.StatusCode != http.StatusOK {
+		log.Warn("第1页返回错误状态码: %d", resp.StatusCode)
+		return nil, fmt.Errorf("API返回错误状态码: %d", resp.StatusCode)
 	}
 
 	// 解析第一页响应
-	respBody := resp.Body()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Warn("读取第1页响应失败: %v", err)
+		return nil, err
+	}
+
 	var proxyListResp ProxyListResponse
 	if err := json.Unmarshal(respBody, &proxyListResp); err != nil {
 		log.Warn("解析第1页响应失败: %v", err)
@@ -726,32 +737,39 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 				<-rateLimiter
 				log.Debug("获得页面%d的限速令牌，开始请求", pageNum)
 
-				// 构建请求URL及参数
-				params := map[string]string{
-					"page":     fmt.Sprintf("%d", pageNum),
-					"per_page": "100", // 每页获取100个代理
-					"type":     "",    // 仅获取SOCKS5类型的代理
-				}
-
 				// 发送请求，每个请求使用新的随机UA
 				currUA := constants.GetRandomUserAgent()
-				resp, err := m.httpClient.R().
-					SetQueryParams(params).
-					SetHeader("User-Agent", currUA).
-					Get(proxyAPIBaseURL)
 
+				// 构建URL和请求
+				url := fmt.Sprintf("%s?page=%d&per_page=100&type=socks5", proxyAPIBaseURL, pageNum)
+				req, err := http.NewRequest("GET", url, nil)
+				if err != nil {
+					log.Warn("创建第%d页代理请求失败: %v", pageNum, err)
+					return
+				}
+
+				req.Header.Set("User-Agent", currUA)
+
+				// 发送请求
+				resp, err := m.httpClient.Do(req)
 				if err != nil {
 					log.Warn("请求第%d页代理失败: %v", pageNum, err)
 					return
 				}
+				defer resp.Body.Close()
 
-				if resp.StatusCode() != http.StatusOK {
-					log.Warn("第%d页返回错误状态码: %d", pageNum, resp.StatusCode())
+				if resp.StatusCode != http.StatusOK {
+					log.Warn("第%d页返回错误状态码: %d", pageNum, resp.StatusCode)
 					return
 				}
 
 				// 解析响应
-				respBody := resp.Body()
+				respBody, err := io.ReadAll(resp.Body)
+				if err != nil {
+					log.Warn("读取第%d页响应失败: %v", pageNum, err)
+					return
+				}
+
 				var proxyListResp ProxyListResponse
 				if err := json.Unmarshal(respBody, &proxyListResp); err != nil {
 					log.Warn("解析第%d页响应失败: %v", pageNum, err)
@@ -923,7 +941,7 @@ func (m *Manager) verifyProxy(proxyAddr string, proxyType string) bool {
 	log.Debug("验证代理 %s 使用UA: %s", proxyAddr, randomUA)
 
 	// 设置更长的超时时间进行验证
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx)
 

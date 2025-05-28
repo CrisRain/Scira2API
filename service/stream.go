@@ -10,12 +10,12 @@ import (
 	"scira2api/models"
 	"scira2api/pkg/constants"
 	"scira2api/pkg/errors"
+	httpClient "scira2api/pkg/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-resty/resty/v2"
 )
 
 // doChatRequestAsync 执行异步聊天请求（流式）
@@ -182,7 +182,7 @@ func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context,
 }
 
 // processResponseStream 处理响应流数据
-func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context, resp *resty.Response, request models.OpenAIChatCompletionsRequest, flusher http.Flusher, counter *TokenCounter) (err error) {
+func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context, resp *httpClient.Response, request models.OpenAIChatCompletionsRequest, flusher http.Flusher, counter *TokenCounter) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("Panic recovered in processResponseStream: %v", r)

@@ -10,16 +10,16 @@ import (
 	"scira2api/models"
 	"scira2api/pkg/constants"
 	"scira2api/pkg/errors"
+	httpClient "scira2api/pkg/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-resty/resty/v2"
 )
 
 // chatRequestResult 聊天请求结果结构体
 type chatRequestResult struct {
-	Resp   *resty.Response
+	Resp   *httpClient.Response
 	ChatId string
 	UserId string
 	Err    error
@@ -168,7 +168,7 @@ func (h *ChatHandler) executeRequestWithRetry(ctx context.Context, request model
 }
 
 // handleRegularResponse 重写处理常规响应
-func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response, model string, request models.OpenAIChatCompletionsRequest, counter *TokenCounter) {
+func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *httpClient.Response, model string, request models.OpenAIChatCompletionsRequest, counter *TokenCounter) {
 	// 确保响应中使用的是外部模型名称
 	externalModel := model
 	if _, exists := config.ModelMapping[model]; exists {
@@ -182,7 +182,10 @@ func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response
 	c.Header("Access-Control-Allow-Origin", "*")
 
 	ctx := c.Request.Context()
-	scanner := bufio.NewScanner(strings.NewReader(resp.String()))
+	// 使用 Body() 方法获取响应内容
+	bodyBytes := resp.Body()
+	bodyString := string(bodyBytes)
+	scanner := bufio.NewScanner(strings.NewReader(bodyString))
 
 	var content, reasoningContent string
 	usage := models.Usage{}
@@ -263,7 +266,7 @@ func (h *ChatHandler) handleRegularResponse(c *gin.Context, resp *resty.Response
 }
 
 // executeRequest 执行单次请求
-func (h *ChatHandler) executeRequest(ctx context.Context, request models.OpenAIChatCompletionsRequest, chatId, userId string) (*resty.Response, error) {
+func (h *ChatHandler) executeRequest(ctx context.Context, request models.OpenAIChatCompletionsRequest, chatId, userId string) (*httpClient.Response, error) {
 	// 将外部模型名称映射为内部模型名称
 	internalModel := MapModelName(request.Model)
 	sciraRequest := request.ToSciraChatCompletionsRequest(internalModel, chatId, userId)
@@ -281,7 +284,11 @@ func (h *ChatHandler) executeRequest(ctx context.Context, request models.OpenAIC
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("HTTP error: %d - %s", resp.StatusCode(), resp.String())
+		bodyStr := ""
+		if body := resp.Body(); body != nil {
+			bodyStr = string(body)
+		}
+		return nil, fmt.Errorf("HTTP error: %d - %s", resp.StatusCode(), bodyStr)
 	}
 
 	return resp, nil

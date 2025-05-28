@@ -8,19 +8,19 @@ import (
 	"scira2api/pkg/cache"
 	"scira2api/pkg/connpool"
 	"scira2api/pkg/constants"
+	httpClient "scira2api/pkg/http"
 	"scira2api/pkg/manager"
 	"scira2api/pkg/ratelimit"
 	"scira2api/proxy"
 	"strings"
 	"time"
-
-	"github.com/go-resty/resty/v2"
+	"net/http"
 )
 
 // ChatHandler 聊天处理器结构体
 type ChatHandler struct {
 	config          *config.Config
-	client          *resty.Client
+	client          *httpClient.HttpClient
 	userManager     *manager.UserManager
 	chatIdGenerator *manager.ChatIdGenerator
 	proxyManager    *proxy.Manager         // SOCKS5代理管理器
@@ -64,7 +64,9 @@ func NewChatHandler(cfg *config.Config) *ChatHandler {
 	
 	// 如果启用了连接池，配置客户端
 	if cfg.ConnPool.Enabled {
-		connPool.ConfigureRestyClient(client)
+		// 注意：这里我们不再调用connPool.ConfigureRestyClient，因为我们不再使用resty客户端
+		// 连接池配置将直接在transport层处理
+		log.Info("使用标准库HTTP客户端，连接池由http.Transport内部管理")
 	}
 
 	// 创建管理器组件
@@ -115,8 +117,8 @@ func NewChatHandler(cfg *config.Config) *ChatHandler {
 }
 
 // createHTTPClient 创建HTTP客户端
-func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *resty.Client {
-	client := resty.New().
+func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *httpClient.HttpClient {
+	client := httpClient.NewHttpClient().
 		SetTimeout(cfg.Client.Timeout).
 		SetBaseURL(cfg.Client.BaseURL).
 		SetHeader("Content-Type", constants.ContentTypeJSON).
@@ -131,25 +133,24 @@ func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *resty.Cl
 
 	// 代理配置优先级：动态代理 > 静态SOCKS5代理 > 静态HTTP代理
 	if cfg.Client.DynamicProxy && proxyManager != nil {
+		// 设置代理管理器
+		client.SetProxyManager(proxyManager)
+		
 		// 为每个请求设置前置处理器，动态获取代理
-		client.OnBeforeRequest(func(c *resty.Client, req *resty.Request) error {
+		client.OnBeforeRequest(func(req *http.Request) error {
 			proxyAddr, err := proxyManager.GetProxy()
 			if err != nil {
 				log.Warn("无法获取动态代理，将使用直接连接: %v", err)
-				c.SetProxy("") // 清除之前可能设置的代理
+				client.SetProxy("") // 清除之前可能设置的代理
 				return nil // 继续请求，但不使用代理
 			}
-			
-			// 不再强制添加协议前缀，因为GetProxy现在已经返回带协议前缀的地址
-			// formatProxyAddress确保了返回的地址已经有正确的协议前缀：
-			// - HTTP/HTTPS代理会带http://前缀
-			// - SOCKS4代理会带socks4://前缀
-			// - SOCKS5代理会带socks5://前缀
 			
 			// 获取代理类型（从URL中提取协议）
 			proxyType := "unknown"
 			if strings.HasPrefix(proxyAddr, "http://") {
 				proxyType = "HTTP"
+			} else if strings.HasPrefix(proxyAddr, "https://") {
+				proxyType = "HTTPS"
 			} else if strings.HasPrefix(proxyAddr, "socks4://") {
 				proxyType = "SOCKS4"
 			} else if strings.HasPrefix(proxyAddr, "socks5://") {
@@ -157,7 +158,7 @@ func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *resty.Cl
 			}
 			
 			log.Info("对请求 %s 使用动态代理(%s): %s", req.URL, proxyType, proxyAddr)
-			c.SetProxy(proxyAddr)
+			// 注意：此处不需要为每个请求设置代理，这将由HttpClient中的SetProxyManager处理
 			return nil
 		})
 	} else if cfg.Client.Socks5Proxy != "" {
@@ -203,7 +204,7 @@ func (h *ChatHandler) GetConfig() *config.Config {
 }
 
 // GetClient 获取HTTP客户端
-func (h *ChatHandler) GetClient() *resty.Client {
+func (h *ChatHandler) GetClient() *httpClient.HttpClient {
 	return h.client
 }
 

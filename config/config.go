@@ -254,7 +254,7 @@ func (c *Config) loadConnPoolConfig() error {
 	c.ConnPool.Enabled = connPoolEnabled
 	
 	// 最大空闲连接数
-	c.ConnPool.MaxIdleConns = getEnvAsInt("MAX_IDLE_CONNS", 100)
+	c.ConnPool.MaxIdleConns = getEnvAsInt("MAX_IDLE_CONNS", 1000)
 	
 	// 每个主机的最大连接数
 	c.ConnPool.MaxConnsPerHost = getEnvAsInt("MAX_CONNS_PER_HOST", runtime.NumCPU()*2)
