@@ -524,41 +524,10 @@ func (m *Manager) fetchAndVerifyProxies() ([]*Proxy, error) {
 	return validProxies, nil
 }
 
-// 添加本地代理到代理池
+// 添加本地代理到代理池 - 当前已禁用预定义本地代理
 func (m *Manager) addLocalProxies() {
-	localProxies := []*Proxy{
-		{
-			Address:      "127.0.0.1:7890",
-			LastVerify:   time.Now(),
-			Type:         "HTTP",
-			Country:      "本地",
-			ResponseTime: 1,
-		},
-		{
-			Address:      "localhost:1080",
-			LastVerify:   time.Now(),
-			Type:         "SOCKS5",
-			Country:      "本地",
-			ResponseTime: 1,
-		},
-	}
-	
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	
-	// 检查是否已存在相同地址的代理
-	existingProxies := make(map[string]bool)
-	for _, p := range m.proxyPool {
-		existingProxies[p.Address] = true
-	}
-	
-	// 添加不重复的本地代理
-	for _, localProxy := range localProxies {
-		if !existingProxies[localProxy.Address] {
-			m.proxyPool = append(m.proxyPool, localProxy)
-			log.Info("添加本地代理: %s (%s)", localProxy.Address, localProxy.Type)
-		}
-	}
+	// 本地代理已禁用
+	log.Info("本地代理功能已禁用")
 }
 
 // fetchProxiesFromAPI 从指定的API批量获取代理
@@ -570,10 +539,6 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 
 	// 获取多页代理数据
 	var allProxies []*Proxy
-	
-	// 初始化为maxPagesFetch，后续根据API返回的总页数动态调整
-	totalPages := maxPagesFetch
-	var totalPagesLock sync.Mutex
 	
 	// 创建速率限制器
 	rateLimiter := make(chan struct{}, burstLimit)
@@ -610,259 +575,213 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 	var mu sync.Mutex      // 保护allProxies
 	var successCount int32 // 成功获取的页数
 
-	// 并发获取多页数据
-	for page := 1; page <= totalPages; page++ {
-		wg.Add(1)
-		go func(pageNum int) {
-			defer wg.Done()
-			
-			// 请求前获取限速令牌
-			log.Debug("等待获取页面%d的限速令牌", pageNum)
-			<-rateLimiter
-			log.Debug("获得页面%d的限速令牌，开始请求", pageNum)
-
-			// 构建请求URL及参数
-			params := map[string]string{
-				"page":     fmt.Sprintf("%d", pageNum),
-				"per_page": "100", // 每页获取100个代理
-				"type":     "socks5", // 仅获取SOCKS5类型的代理
-			}
-
-			// 可选：按国家/地区筛选，可以根据需要启用
-			// params["country"] = "香港,日本,新加坡"
-
-			// 发送请求，每个请求使用新的随机UA
-			currUA := constants.GetRandomUserAgent()
-			resp, err := m.httpClient.R().
-				SetQueryParams(params).
-				SetHeader("User-Agent", currUA).
-				Get(proxyAPIBaseURL)
-
-			if err != nil {
-				log.Warn("请求第%d页代理失败: %v", pageNum, err)
-				return
-			}
-
-			if resp.StatusCode() != http.StatusOK {
-				log.Warn("第%d页返回错误状态码: %d", pageNum, resp.StatusCode())
-				return
-			}
-
-			// 关闭调试模式
-			debug := false // 关闭调试模式
-			if debug {
-				debugDir := "debug"
-				if _, err := os.Stat(debugDir); os.IsNotExist(err) {
-					os.Mkdir(debugDir, 0755)
-				}
-				fileName := fmt.Sprintf("%s/proxy_resp_page%d.json", debugDir, pageNum)
-				err := os.WriteFile(fileName, resp.Body(), 0644)
-				if err != nil {
-					log.Warn("保存响应内容失败: %v", err)
-				}
-			}
-
-			// 打印原始响应以便调试
-			respBody := resp.Body()
-			if len(respBody) > 0 {
-				sample := string(respBody)
-				if len(sample) > 200 {
-					sample = sample[:200] + "..." // 截断长响应
-				}
-				log.Debug("第%d页响应样本: %s", pageNum, sample)
-			}
-
-			var proxyListResp ProxyListResponse
-			if err := json.Unmarshal(respBody, &proxyListResp); err != nil {
-				log.Warn("解析第%d页响应失败: %v", pageNum, err)
-				// 尝试解析为通用JSON，获取更多错误信息
-				var genericResp map[string]interface{}
-				if jsonErr := json.Unmarshal(respBody, &genericResp); jsonErr == nil {
-					log.Warn("第%d页响应通用解析: %+v", pageNum, genericResp)
-				}
-				return
-			}
-
-			// 更全面的响应验证
-			if !proxyListResp.Success {
-				log.Warn("第%d页返回success=false", pageNum)
-				return
-			}
-
-			// 检查并记录API返回的分页信息
-			if proxyListResp.Data.Pagination.CurrentPage > 0 {
-				log.Info("第%d页分页信息: 当前页=%d, 每页=%d, 总页=%d, 总数=%d",
-					pageNum,
-					proxyListResp.Data.Pagination.CurrentPage,
-					proxyListResp.Data.Pagination.PerPage,
-					proxyListResp.Data.Pagination.TotalPages,
-					proxyListResp.Data.Pagination.Total)
-				
-				// 更新总页数，确保爬取所有页面
-				if proxyListResp.Data.Pagination.TotalPages > 0 {
-					totalPagesLock.Lock()
-					if proxyListResp.Data.Pagination.TotalPages < totalPages {
-						totalPages = proxyListResp.Data.Pagination.TotalPages
-					}
-					totalPagesLock.Unlock()
-					
-					// 如果当前只启动了有限数量的爬取协程，但API返回了更多页面，则继续启动协程爬取剩余页面
-					totalPagesLock.Lock()
-					currentTotalPages := totalPages
-					totalPagesLock.Unlock()
-					
-					if pageNum == 1 && currentTotalPages > 10 {
-						// 启动更多协程爬取剩余页面
-						for additionalPage := 11; additionalPage <= currentTotalPages; additionalPage++ {
-							wg.Add(1)
-							go func(p int) {
-								defer wg.Done()
-								
-								// 请求前获取限速令牌
-								log.Debug("等待获取额外页面%d的限速令牌", p)
-								<-rateLimiter
-								log.Debug("获得额外页面%d的限速令牌，开始请求", p)
-								
-								// 为额外页面创建一个新的请求
-								additionalParams := map[string]string{
-									"page":     fmt.Sprintf("%d", p),
-									"per_page": "100",
-									"type":     "socks5",
-								}
-								
-								// 发送请求获取额外页面
-								additionalUA := constants.GetRandomUserAgent()
-								additionalResp, err := m.httpClient.R().
-									SetQueryParams(additionalParams).
-									SetHeader("User-Agent", additionalUA).
-									Get(proxyAPIBaseURL)
-									
-								if err != nil || additionalResp.StatusCode() != http.StatusOK {
-									log.Warn("请求额外页面%d失败", p)
-									return
-								}
-								
-								// 解析响应
-								var additionalProxyListResp ProxyListResponse
-								if err := json.Unmarshal(additionalResp.Body(), &additionalProxyListResp); err != nil {
-									log.Warn("解析额外页面%d响应失败: %v", p, err)
-									return
-								}
-								
-								if !additionalProxyListResp.Success || additionalProxyListResp.Data.Proxies == nil {
-									return
-								}
-								
-								// 处理代理数据
-								var pageProxies []*Proxy
-								for _, proxyInfo := range additionalProxyListResp.Data.Proxies {
-									if proxyInfo.Status == 1 && proxyInfo.IP != "" && proxyInfo.Port > 0 {
-										proxyType := strings.ToUpper(proxyInfo.Type)
-										if proxyType == ProxyTypeSOCKS5 {
-											proxy := &Proxy{
-												Address:      fmt.Sprintf("%s:%d", proxyInfo.IP, proxyInfo.Port),
-												LastVerify:   time.Now(),
-												Type:         proxyType,
-												Country:      proxyInfo.Country,
-												ResponseTime: proxyInfo.ResponseTime,
-											}
-											pageProxies = append(pageProxies, proxy)
-										}
-									}
-								}
-								
-								// 添加到总列表
-								if len(pageProxies) > 0 {
-									mu.Lock()
-									allProxies = append(allProxies, pageProxies...)
-									atomic.AddInt32(&successCount, 1)
-									mu.Unlock()
-									
-									log.Info("额外页面%d获取到%d个有效代理", p, len(pageProxies))
-								}
-							}(additionalPage)
-						}
-					}
-				}
-			}
-
-			// 检查代理数据
-			if proxyListResp.Data.Proxies == nil {
-				log.Warn("第%d页代理数据为null", pageNum)
-				return
-			}
-
-			if len(proxyListResp.Data.Proxies) == 0 {
-				log.Warn("第%d页代理数据为空数组", pageNum)
-				return
-			}
-
-			// 收集代理信息
-			var pageProxies []*Proxy
-			for _, proxyInfo := range proxyListResp.Data.Proxies {
-				if proxyInfo.Status == 1 { // 只使用状态为1(有效)的代理
-					// 跳过无效的IP或端口
-					if proxyInfo.IP == "" || proxyInfo.Port <= 0 {
-						continue
-					}
-
-					// 处理代理类型
-					proxyType := strings.ToUpper(proxyInfo.Type)
-
-					// 如果没有类型信息，则记录警告并跳过
-					if proxyType == "" {
-						log.Warn("跳过无类型信息的代理: %s:%d", proxyInfo.IP, proxyInfo.Port)
-						continue
-					}
-
-					// 记录具体的代理详情，以便于调试
-					log.Debug("处理代理: ID=%d, IP=%s, 端口=%d, 类型=%s, 国家=%s, 响应时间=%dms",
-						proxyInfo.ID, proxyInfo.IP, proxyInfo.Port, proxyType,
-						proxyInfo.Country, proxyInfo.ResponseTime)
-
-					// 验证代理类型是否为已知类型
-					isValidType := false
-					switch proxyType {
-					case ProxyTypeHTTP, ProxyTypeHTTPS, ProxyTypeSOCKS4, ProxyTypeSOCKS5:
-						isValidType = true
-					}
-
-					if !isValidType {
-						log.Warn("跳过未知类型(%s)的代理: %s:%d", proxyType, proxyInfo.IP, proxyInfo.Port)
-						continue
-					}
-
-					proxy := &Proxy{
-						Address:      fmt.Sprintf("%s:%d", proxyInfo.IP, proxyInfo.Port),
-						LastVerify:   time.Now(),
-						Type:         proxyType,
-						Country:      proxyInfo.Country,
-						ResponseTime: proxyInfo.ResponseTime,
-					}
-
-					pageProxies = append(pageProxies, proxy)
-				}
-			}
-
-			// 添加到总列表
-			if len(pageProxies) > 0 {
-				mu.Lock()
-				allProxies = append(allProxies, pageProxies...)
-				atomic.AddInt32(&successCount, 1)
-				mu.Unlock()
-
-				log.Info("第%d页获取到%d个有效代理，样例: %s (%s)",
-					pageNum, len(pageProxies),
-					pageProxies[0].Address, pageProxies[0].Type)
-			} else {
-				log.Warn("第%d页未找到有效代理", pageNum)
-			}
-
-		}(page)
+	// 先获取第一页以确定总页数
+	log.Info("先获取第一页代理以确定总页数...")
+	
+	// 获取限速令牌
+	<-rateLimiter
+	
+	// 构建第一页请求参数
+	params := map[string]string{
+		"page":     "1",
+		"per_page": "100", // 每页获取100个代理
+		"type":     "socks5", // 仅获取SOCKS5类型的代理
 	}
 
-	// 等待所有请求完成
-	wg.Wait()
+	// 发送请求获取第一页
+	currUA := constants.GetRandomUserAgent()
+	resp, err := m.httpClient.R().
+		SetQueryParams(params).
+		SetHeader("User-Agent", currUA).
+		Get(proxyAPIBaseURL)
+
+	if err != nil {
+		log.Warn("请求第1页代理失败: %v", err)
+		return nil, err
+	}
+
+	if resp.StatusCode() != http.StatusOK {
+		log.Warn("第1页返回错误状态码: %d", resp.StatusCode())
+		return nil, fmt.Errorf("API返回错误状态码: %d", resp.StatusCode())
+	}
+
+	// 解析第一页响应
+	respBody := resp.Body()
+	var proxyListResp ProxyListResponse
+	if err := json.Unmarshal(respBody, &proxyListResp); err != nil {
+		log.Warn("解析第1页响应失败: %v", err)
+		return nil, err
+	}
+
+	// 验证响应
+	if !proxyListResp.Success {
+		log.Warn("第1页返回success=false")
+		return nil, fmt.Errorf("API返回success=false")
+	}
+
+	// 确定实际总页数
+	totalPages := proxyListResp.Data.Pagination.TotalPages
+	if totalPages <= 0 {
+		totalPages = 1 // 如果API没返回有效的总页数，就只处理第一页
+	} else if totalPages > maxPagesFetch {
+		totalPages = maxPagesFetch // 限制最大页数
+	}
+	
+	log.Info("API返回总页数: %d, 将爬取页数: %d", proxyListResp.Data.Pagination.TotalPages, totalPages)
+
+	// 处理第一页数据
+	var firstPageProxies []*Proxy
+	for _, proxyInfo := range proxyListResp.Data.Proxies {
+		if proxyInfo.Status == 1 && proxyInfo.IP != "" && proxyInfo.Port > 0 {
+			proxyType := strings.ToUpper(proxyInfo.Type)
+			// 验证代理类型是否为已知类型
+			isValidType := false
+			switch proxyType {
+			case ProxyTypeHTTP, ProxyTypeHTTPS, ProxyTypeSOCKS4, ProxyTypeSOCKS5:
+				isValidType = true
+			}
+			
+			if !isValidType {
+				log.Warn("跳过未知类型(%s)的代理: %s:%d", proxyType, proxyInfo.IP, proxyInfo.Port)
+				continue
+			}
+			
+			proxy := &Proxy{
+				Address:      fmt.Sprintf("%s:%d", proxyInfo.IP, proxyInfo.Port),
+				LastVerify:   time.Now(),
+				Type:         proxyType,
+				Country:      proxyInfo.Country,
+				ResponseTime: proxyInfo.ResponseTime,
+			}
+			firstPageProxies = append(firstPageProxies, proxy)
+		}
+	}
+	
+	// 添加第一页数据到结果
+	mu.Lock()
+	allProxies = append(allProxies, firstPageProxies...)
+	if len(firstPageProxies) > 0 {
+		atomic.AddInt32(&successCount, 1)
+	}
+	mu.Unlock()
+	
+	log.Info("第1页获取到%d个有效代理", len(firstPageProxies))
+
+	// 如果有多页，并发爬取剩余页面（从第2页开始）
+	if totalPages > 1 {
+		for page := 2; page <= totalPages; page++ {
+			wg.Add(1)
+			go func(pageNum int) {
+				defer wg.Done()
+				
+				// 请求前获取限速令牌
+				log.Debug("等待获取页面%d的限速令牌", pageNum)
+				<-rateLimiter
+				log.Debug("获得页面%d的限速令牌，开始请求", pageNum)
+
+				// 构建请求URL及参数
+				params := map[string]string{
+					"page":     fmt.Sprintf("%d", pageNum),
+					"per_page": "100", // 每页获取100个代理
+					"type":     "socks5", // 仅获取SOCKS5类型的代理
+				}
+
+				// 发送请求，每个请求使用新的随机UA
+				currUA := constants.GetRandomUserAgent()
+				resp, err := m.httpClient.R().
+					SetQueryParams(params).
+					SetHeader("User-Agent", currUA).
+					Get(proxyAPIBaseURL)
+
+				if err != nil {
+					log.Warn("请求第%d页代理失败: %v", pageNum, err)
+					return
+				}
+
+				if resp.StatusCode() != http.StatusOK {
+					log.Warn("第%d页返回错误状态码: %d", pageNum, resp.StatusCode())
+					return
+				}
+
+				// 解析响应
+				respBody := resp.Body()
+				var proxyListResp ProxyListResponse
+				if err := json.Unmarshal(respBody, &proxyListResp); err != nil {
+					log.Warn("解析第%d页响应失败: %v", pageNum, err)
+					return
+				}
+
+				// 验证响应
+				if !proxyListResp.Success {
+					log.Warn("第%d页返回success=false", pageNum)
+					return
+				}
+
+				// 检查代理数据
+				if len(proxyListResp.Data.Proxies) == 0 {
+					log.Warn("第%d页代理数据为空", pageNum)
+					return
+				}
+
+				// 收集代理信息
+				var pageProxies []*Proxy
+				for _, proxyInfo := range proxyListResp.Data.Proxies {
+					if proxyInfo.Status == 1 { // 只使用状态为1(有效)的代理
+						// 跳过无效的IP或端口
+						if proxyInfo.IP == "" || proxyInfo.Port <= 0 {
+							continue
+						}
+
+						// 处理代理类型
+						proxyType := strings.ToUpper(proxyInfo.Type)
+
+						// 如果没有类型信息，则记录警告并跳过
+						if proxyType == "" {
+							log.Warn("跳过无类型信息的代理: %s:%d", proxyInfo.IP, proxyInfo.Port)
+							continue
+						}
+
+						// 验证代理类型是否为已知类型
+						isValidType := false
+						switch proxyType {
+						case ProxyTypeHTTP, ProxyTypeHTTPS, ProxyTypeSOCKS4, ProxyTypeSOCKS5:
+							isValidType = true
+						}
+
+						if !isValidType {
+							log.Warn("跳过未知类型(%s)的代理: %s:%d", proxyType, proxyInfo.IP, proxyInfo.Port)
+							continue
+						}
+
+						proxy := &Proxy{
+							Address:      fmt.Sprintf("%s:%d", proxyInfo.IP, proxyInfo.Port),
+							LastVerify:   time.Now(),
+							Type:         proxyType,
+							Country:      proxyInfo.Country,
+							ResponseTime: proxyInfo.ResponseTime,
+						}
+
+						pageProxies = append(pageProxies, proxy)
+					}
+				}
+
+				// 添加到总列表
+				if len(pageProxies) > 0 {
+					mu.Lock()
+					allProxies = append(allProxies, pageProxies...)
+					atomic.AddInt32(&successCount, 1)
+					mu.Unlock()
+
+					log.Info("第%d页获取到%d个有效代理", pageNum, len(pageProxies))
+				} else {
+					log.Warn("第%d页未找到有效代理", pageNum)
+				}
+			}(page)
+		}
+
+		// 等待所有请求完成
+		wg.Wait()
+	}
 
 	// 检查是否至少有一个页面成功
 	if atomic.LoadInt32(&successCount) == 0 {
@@ -885,8 +804,8 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 		return nil, fmt.Errorf("未找到有效的代理")
 	}
 
+	// 记录代理统计信息
 	if len(allProxies) > 0 {
-		// 记录具体的代理类型统计
 		typeCount := make(map[string]int)
 		countryCount := make(map[string]int)
 
@@ -897,9 +816,8 @@ func (m *Manager) fetchProxiesFromAPI() ([]*Proxy, error) {
 
 		log.Info("共获取到 %d 个有效代理，类型分布: %v", len(allProxies), typeCount)
 		log.Debug("国家/地区分布: %v", countryCount)
-	} else {
-		log.Warn("没有获取到任何有效代理")
 	}
+	
 	return allProxies, nil
 }
 
