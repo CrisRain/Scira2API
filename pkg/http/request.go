@@ -186,14 +186,21 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 			}
 		}
 		
+		// 记录请求开始的日志
+		log.Info("开始处理请求: %s %s", method, fullURL)
+		
 		// 代理处理策略：先尝试动态代理，再尝试静态代理，最后使用标准客户端
 		var proxyUsed bool = false
+		var usedProxyType string = "无"
+		var usedProxyAddr string = "直接连接"
 		// httpResp will be part of 'resp' which is declared outside the loop.
 		// 'err' is also declared outside the loop.
 
 		// 1. 尝试使用动态代理 (如果启用)
 		if r.client.dynamicProxy && r.client.proxyManager != nil {
+			log.Info("尝试获取动态代理...")
 			if proxyAddr, getProxyErr := r.client.proxyManager.GetProxy(); getProxyErr == nil { // Shadow 'err' for this block
+				log.Info("成功获取动态代理: %s", proxyAddr)
 				transport := &http.Transport{}
 				proxyURLVal, parseProxyErr := url.Parse(proxyAddr)
 				if parseProxyErr == nil {
@@ -204,11 +211,15 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 						Timeout:   r.client.timeout,
 					}
 					
+					log.Info("使用动态代理发送请求: %s", proxyAddr)
 					var dynHttpResp *http.Response
 					dynHttpResp, err = tempClient.Do(req) // Assign to loop-scoped 'err'
 
 					if err == nil {
+						log.Info("动态代理请求成功，状态码: %d", dynHttpResp.StatusCode)
 						proxyUsed = true
+						usedProxyType = "动态代理"
+						usedProxyAddr = proxyAddr
 						resp = &Response{
 							httpResp: dynHttpResp,
 							request:  req,
@@ -217,13 +228,20 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 							if parseErr := resp.parseBody(); parseErr != nil {
 								resp.httpResp.Body.Close()
 								proxyUsed = false
+								usedProxyType = "无"
+								usedProxyAddr = "直接连接"
+								log.Warn("解析动态代理响应失败: %v", parseErr)
 								err = parseErr
 							} else {
+								log.Info("请求完成，使用: %s (%s)", usedProxyType, usedProxyAddr)
 								return resp, nil // Dynamic proxy success
 							}
 						} else {
+							log.Info("请求完成，使用: %s (%s)", usedProxyType, usedProxyAddr)
 							return resp, nil // Dynamic proxy success (no parsing)
 						}
+					} else {
+						log.Warn("动态代理请求失败: %v", err)
 					}
 					// If dynamic proxy HTTP call failed, 'err' is set. Loop continues.
 				} else {
@@ -238,13 +256,17 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 
 		// 2. 如果动态代理未启用/失败 (proxyUsed is false) 且配置了静态代理，则尝试静态代理
 		if !proxyUsed && r.client.proxyURL != "" {
+			log.Info("尝试使用静态代理: %s", r.client.proxyURL)
 			// 静态代理已通过 SetProxy 方法配置到 r.client.client (the main client)
 			// Its transport is already configured.
 			var staticHttpResp *http.Response
 			staticHttpResp, err = r.client.client.Do(req) // Use the main client
 
 			if err == nil {
+				log.Info("静态代理请求成功，状态码: %d", staticHttpResp.StatusCode)
 				proxyUsed = true
+				usedProxyType = "静态代理"
+				usedProxyAddr = r.client.proxyURL
 				resp = &Response{
 					httpResp: staticHttpResp,
 					request:  req,
@@ -253,13 +275,20 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 					if parseErr := resp.parseBody(); parseErr != nil {
 						resp.httpResp.Body.Close()
 						proxyUsed = false
+						usedProxyType = "无"
+						usedProxyAddr = "直接连接"
+						log.Warn("解析静态代理响应失败: %v", parseErr)
 						err = parseErr
 					} else {
+						log.Info("请求完成，使用: %s (%s)", usedProxyType, usedProxyAddr)
 						return resp, nil // Static proxy success
 					}
 				} else {
+					log.Info("请求完成，使用: %s (%s)", usedProxyType, usedProxyAddr)
 					return resp, nil // Static proxy success (no parsing)
 				}
+			} else {
+				log.Warn("静态代理请求失败: %v", err)
 			}
 			// If static proxy HTTP call failed, 'err' is set. Loop continues.
 		}
@@ -280,10 +309,12 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 			// We only proceed if 'err' from previous proxy attempts allows for a non-proxy attempt.
 			// Or, more simply, always try the direct/default client if no proxy attempt succeeded.
 			
+			log.Info("尝试使用直接连接发送请求")
 			var directHttpResp *http.Response
 			directHttpResp, err = r.client.client.Do(req) // This uses the client's current transport
 
 			if err == nil {
+				log.Info("直接连接请求成功，状态码: %d", directHttpResp.StatusCode)
 				resp = &Response{
 					httpResp: directHttpResp,
 					request:  req,
@@ -291,14 +322,19 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 				if !r.doNotParseResponse {
 					if parseErr := resp.parseBody(); parseErr != nil {
 						resp.httpResp.Body.Close()
+						log.Warn("解析直接连接响应失败: %v", parseErr)
 						err = parseErr // This error will be used for the retry loop or final return
 						// continue // Let the loop handle retry based on 'err'
 					} else {
+						log.Info("请求完成，使用: 直接连接")
 						return resp, nil // Success
 					}
 				} else {
+					log.Info("请求完成，使用: 直接连接")
 					return resp, nil // Success (no parsing needed)
 				}
+			} else {
+				log.Warn("直接连接请求失败: %v", err)
 			}
 			// If r.client.client.Do(req) failed, 'err' is set.
 		}
@@ -310,6 +346,7 @@ func (r *Request) Execute(method, path string) (*Response, error) {
 		}
 	}
 	
+	log.Error("所有请求尝试都失败了")
 	return nil, fmt.Errorf("请求失败，无详细错误")
 }
 
