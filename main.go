@@ -122,6 +122,7 @@ func main() {
 		Handler:      router,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
+		IdleTimeout:  cfg.Server.IdleTimeout, // 设置 IdleTimeout
 	}
 	
 	// 优化点: 添加信号处理和优雅关闭

@@ -156,7 +156,7 @@ func (h *ChatHandler) handleSyncRequest(c *gin.Context, request models.OpenAICha
 // 目的: 提高错误跟踪和上下文传递
 // 预期效果: 更容易跟踪单个请求的完整生命周期
 // doChatRequestRegular 执行常规聊天请求（非流式）
-func (h *ChatHandler) doChatRequestRegular(ctx context.Context, request models.OpenAIChatCompletionsRequest, counter *TokenCounter, reqID string) <-chan chatRequestResult {
+func (h *ChatHandler) doChatRequestRegular(ctx context.Context, request models.OpenAIChatCompletionsRequest, _ *TokenCounter, reqID string) <-chan chatRequestResult {
 	resultChan := make(chan chatRequestResult, constants.ChannelBufferSize)
 
 	go func() {

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	stdErrors "errors"
 
 	"github.com/gin-gonic/gin"
 )
@@ -29,7 +30,7 @@ func (h *ChatHandler) doChatRequestAsync(c *gin.Context, request models.OpenAICh
 		return errors.ErrStreamingNotSupported
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), h.config.Client.Timeout)
+	ctx, cancel := context.WithCancel(c.Request.Context())
 	// 不使用defer cancel()，而是在流式响应结束后手动取消上下文
 	// 这样可以确保心跳goroutine在流式响应结束后立即停止
 
@@ -143,6 +144,7 @@ func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context,
 		SetBody(sciraRequest).
 		SetDoNotParseResponse(true).
 		Execute("POST", constants.APISearchEndpoint)
+
 
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w, URL: %s, Method: POST", err, constants.APISearchEndpoint)
@@ -284,23 +286,38 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 			errCount = 0
 		}
 	}
-
 	scannerError := scanner.Err()
+	// 原始 scanner.Err() 的 Info 日志已移除，保留后续特定条件下的 Warn/Error 日志
 
-	// 发送结束消息
-	// 始终尝试发送最终消息，以确保 [DONE] 被发送。
-	// This is crucial for ensuring the client knows the stream has ended, even if there was a scanner error.
-	finalMessageErr := h.sendFinalMessage(c.Writer, flusher, responseID, created, externalModel, counter)
-
-	if scannerError != nil {
-		if finalMessageErr != nil {
-			// 如果发送最终消息也失败了，记录下来，但优先返回 scannerError。
-			log.Error("Error sending final message after scanner error (%v): %v", scannerError, finalMessageErr)
-		}
-		return fmt.Errorf("scanner error: %w", scannerError)
+	// 如果 scanner 的原始错误是 context.Canceled，
+	// 表明在读取上游数据时客户端已断开连接。
+	// 这种情况下，不应尝试发送最终的成功消息。
+	if stdErrors.Is(scannerError, context.Canceled) {
+		log.Warn("processResponseStream: Scanner stopped because context was canceled (likely client disconnected during upstream read). Upstream data might be incomplete. Returning context.Canceled.")
+		return context.Canceled // 直接返回 context.Canceled
 	}
 
-	return finalMessageErr // 返回发送最终消息的错误（如果有）。
+	// 如果 scanner 遇到其他错误（例如 bufio.ErrTooLong 或其他IO错误）
+	if scannerError != nil {
+		log.Error("processResponseStream: Scanner encountered an unhandled error: %v. Attempting to send error SSE.", scannerError)
+		// 在这里，我们应该尝试向客户端发送一个包含此错误的SSE消息，然后发送[DONE]
+		// 这部分可以复用或借鉴 panic 或 maxErrors 时的错误发送逻辑
+		// 例如: sendSpecificErrorSSE(writer, flusher, model, details, counter, responseID, created)
+		// 此处简化处理：记录错误，然后尝试发送一个通用的错误完成reason
+		// 理想情况下，应该发送具体的错误信息给客户端
+		h.sendErrorFinishSSE(c.Writer, flusher, responseID, created, externalModel, fmt.Sprintf("scanner error: %v", scannerError), counter)
+		return fmt.Errorf("scanner error: %w", scannerError) // 返回原始的 scanner 错误
+	}
+
+	// scannerError is nil, indicating upstream likely sent EOF. This is the "normal" success path.
+	// 只有在 scannerError 为 nil (上游正常结束) 时，才发送成功的 finalMessage.
+	finalMessageErr := h.sendFinalMessage(c.Writer, flusher, responseID, created, externalModel, counter)
+	if finalMessageErr != nil {
+		log.Error("processResponseStream: Error from sendFinalMessage: %v", finalMessageErr)
+		return finalMessageErr // 如果发送最终消息失败，返回该错误
+	}
+	log.Info("processResponseStream: Successfully sent final message and [DONE].")
+	return nil // 正常成功完成
 }
 
 // generateResponseID 生成OpenAI格式的响应ID
@@ -467,9 +484,10 @@ func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.F
 	correctedUsage := h.correctUsage(serverUsage, calculatedUsage)
 	
 	// 记录原始和校正后的统计数据
-	log.Info("流式Token统计对比 - 服务器: 提示=%d, 完成=%d, 总计=%d | 计算值: 提示=%d, 完成=%d, 总计=%d",
-		serverUsage.PromptTokens, serverUsage.CompletionTokens, serverUsage.TotalTokens,
-		calculatedUsage.PromptTokens, calculatedUsage.CompletionTokens, calculatedUsage.TotalTokens)
+	// log.Info("流式Token统计对比 - 服务器: 提示=%d, 完成=%d, 总计=%d | 计算值: 提示=%d, 完成=%d, 总计=%d",
+	// 	serverUsage.PromptTokens, serverUsage.CompletionTokens, serverUsage.TotalTokens,
+	// 	calculatedUsage.PromptTokens, calculatedUsage.CompletionTokens, calculatedUsage.TotalTokens)
+	// 调试日志已移除
 	
 	// 添加校正后的tokens统计信息
 	finalResponse.Usage = correctedUsage

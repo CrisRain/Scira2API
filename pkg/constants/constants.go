@@ -21,6 +21,7 @@ const (
 	DefaultPort          = "8080"
 	DefaultReadTimeout   = 30 * time.Second
 	DefaultWriteTimeout  = 30 * time.Second
+	DefaultIdleTimeout   = 300 * time.Second // 默认服务器空闲超时，例如5分钟
 	DefaultClientTimeout = 300 * time.Second
 	DefaultRetryCount    = 1
 )

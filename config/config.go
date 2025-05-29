@@ -31,6 +31,7 @@ type ServerConfig struct {
 	Port         string        `json:"port"`
 	ReadTimeout  time.Duration `json:"read_timeout"`
 	WriteTimeout time.Duration `json:"write_timeout"`
+	IdleTimeout  time.Duration `json:"idle_timeout"` // 新增 IdleTimeout
 }
 
 // AuthConfig 认证配置
@@ -122,6 +123,8 @@ func (c *Config) loadServerConfig() error {
 	c.Server.Port = getEnvWithDefault("PORT", constants.DefaultPort)
 	c.Server.ReadTimeout = time.Duration(getEnvAsInt("READ_TIMEOUT", int(constants.DefaultReadTimeout.Seconds()))) * time.Second
 	c.Server.WriteTimeout = time.Duration(getEnvAsInt("WRITE_TIMEOUT", int(constants.DefaultWriteTimeout.Seconds()))) * time.Second
+	// 默认 IdleTimeout 为 5 分钟 (300 秒)，如果环境变量未设置
+	c.Server.IdleTimeout = time.Duration(getEnvAsInt("IDLE_TIMEOUT", int(constants.DefaultIdleTimeout.Seconds()))) * time.Second
 	return nil
 }
 
