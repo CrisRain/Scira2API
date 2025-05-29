@@ -1,7 +1,9 @@
 package service
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"scira2api/config"
 	"scira2api/log"
 	"scira2api/models"
@@ -13,74 +15,196 @@ import (
 	"scira2api/pkg/ratelimit"
 	"scira2api/proxy"
 	"strings"
+	"sync"
 	"time"
-	"net/http"
+)
+
+// 优化点: 定义自定义错误类型
+// 目的: 提高错误处理的精确性和可读性
+// 预期效果: 更明确的错误原因，更易于诊断问题
+var (
+	ErrInvalidConfig   = errors.New("无效的配置")
+	ErrProxySetupFailed = errors.New("代理设置失败")
+	ErrResourceCleanup = errors.New("资源清理失败")
 )
 
 // ChatHandler 聊天处理器结构体
+// 优化点: 结构体字段组织和注释优化
+// 目的: 提高代码可读性，便于理解各组件的作用
+// 预期效果: 更清晰的代码结构，易于维护
 type ChatHandler struct {
-	config          *config.Config
-	client          *httpClient.HttpClient
-	userManager     *manager.UserManager
-	chatIdGenerator *manager.ChatIdGenerator
-	proxyManager    *proxy.Manager         // SOCKS5代理管理器
+	// 基础配置
+	config          *config.Config          // 全局配置
+	
+	// 网络与通信组件
+	client          *httpClient.HttpClient  // HTTP客户端
+	connPool        *connpool.ConnPool      // 连接池
+	
+	// 用户与会话管理
+	userManager     *manager.UserManager    // 用户管理器
+	chatIdGenerator *manager.ChatIdGenerator // 会话ID生成器
+	
+	// 代理管理
+	proxyManager    *proxy.Manager          // 代理管理器
 	
 	// 性能优化组件
-	responseCache  *cache.ResponseCache    // 响应缓存
-	connPool       *connpool.ConnPool      // 连接池
-	rateLimiter    ratelimit.RateLimiter   // 请求限制器
+	responseCache   *cache.ResponseCache    // 响应缓存
+	rateLimiter     ratelimit.RateLimiter   // 请求限制器
+	
+	// 运行时统计与资源管理
+	metrics         *handlerMetrics         // 运行时指标
+	shutdown        sync.Once               // 确保只执行一次关闭操作
+}
+
+// handlerMetrics 处理器运行时指标
+// 优化点: 添加详细的指标收集结构
+// 目的: 提供更详细的性能和使用情况统计
+// 预期效果: 更好的监控和性能调优
+type handlerMetrics struct {
+	requestCount        int64         // 总请求数
+	cacheHitCount       int64         // 缓存命中次数
+	proxyUseCount       int64         // 代理使用次数
+	proxyErrors         int64         // 代理错误次数
+	lastRequestTime     time.Time     // 最后请求时间
+	responseLatencies   []time.Duration // 响应延迟历史
+	mu                  sync.RWMutex  // 指标读写锁
+}
+
+// newHandlerMetrics 创建新的指标收集器
+func newHandlerMetrics() *handlerMetrics {
+	return &handlerMetrics{
+		responseLatencies: make([]time.Duration, 0, 100),
+		lastRequestTime:   time.Now(),
+	}
+}
+
+// ChatHandlerBuilder 聊天处理器构建器
+// 优化点: 使用构建器模式
+// 目的: 降低初始化复杂度，提高可读性
+// 预期效果: 清晰的初始化流程，降低条件判断嵌套
+type ChatHandlerBuilder struct {
+	config      *config.Config
+	connPool    *connpool.ConnPool
+	proxyManager *proxy.Manager
+	client      *httpClient.HttpClient
+	userManager *manager.UserManager
+	chatIdGenerator *manager.ChatIdGenerator
+	responseCache *cache.ResponseCache
+	rateLimiter  ratelimit.RateLimiter
 }
 
 // NewChatHandler 创建新的聊天处理器实例
+// 优化点: 使用构建器模式重构初始化流程
+// 目的: 提高代码可读性，降低条件判断嵌套
+// 预期效果: 更清晰、更易维护的初始化流程
 func NewChatHandler(cfg *config.Config) *ChatHandler {
-	// 初始化连接池
-	var connPool *connpool.ConnPool
+	if cfg == nil {
+		log.Error("配置为空，无法创建ChatHandler")
+		return nil
+	}
+	
+	// 使用构建器模式初始化
+	builder := newChatHandlerBuilder(cfg)
+	
+	// 按照依赖顺序初始化各组件
+	builder = builder.setupConnPool().
+		setupProxyManager().
+		setupHTTPClient().
+		setupManagers().
+		setupCache().
+		setupRateLimiter()
+	
+	// 构建并返回ChatHandler实例
+	return builder.build()
+}
+
+// newChatHandlerBuilder 创建聊天处理器构建器
+func newChatHandlerBuilder(cfg *config.Config) *ChatHandlerBuilder {
+	return &ChatHandlerBuilder{
+		config: cfg,
+	}
+}
+
+// setupConnPool 设置连接池
+func (b *ChatHandlerBuilder) setupConnPool() *ChatHandlerBuilder {
+	cfg := b.config
+	
+	// 优化点: 减少嵌套，使用默认值
+	// 目的: 提高代码可读性
+	// 预期效果: 更简洁的初始化逻辑
+	poolOptions := &connpool.ConnPoolOptions{
+		MaxIdleConns:        30, // 默认值
+		MaxConnsPerHost:     10, // 默认值
+		MaxIdleConnsPerHost: 5,  // 默认值
+		IdleConnTimeout:     90 * time.Second, // 默认值
+		TLSHandshakeTimeout: 10 * time.Second,
+		KeepAlive:           30 * time.Second,
+	}
+	
+	// 如果启用了连接池，使用配置的参数
 	if cfg.ConnPool.Enabled {
-		poolOptions := &connpool.ConnPoolOptions{
-			MaxIdleConns:        cfg.ConnPool.MaxIdleConns,
-			MaxConnsPerHost:     cfg.ConnPool.MaxConnsPerHost,
-			MaxIdleConnsPerHost: cfg.ConnPool.MaxIdleConnsPerHost,
-			IdleConnTimeout:     cfg.ConnPool.IdleConnTimeout,
-			TLSHandshakeTimeout: 10 * time.Second,
-			KeepAlive:           30 * time.Second,
-		}
-		connPool = connpool.NewConnPool(poolOptions)
+		poolOptions.MaxIdleConns = cfg.ConnPool.MaxIdleConns
+		poolOptions.MaxConnsPerHost = cfg.ConnPool.MaxConnsPerHost
+		poolOptions.MaxIdleConnsPerHost = cfg.ConnPool.MaxIdleConnsPerHost
+		poolOptions.IdleConnTimeout = cfg.ConnPool.IdleConnTimeout
+		
 		log.Info("连接池已启用: MaxIdleConns=%d, MaxConnsPerHost=%d",
-			cfg.ConnPool.MaxIdleConns, cfg.ConnPool.MaxConnsPerHost)
+			poolOptions.MaxIdleConns, poolOptions.MaxConnsPerHost)
 	} else {
-		connPool = connpool.NewConnPool(nil)
 		log.Info("连接池已禁用，使用默认HTTP客户端配置")
 	}
 	
-	// 初始化代理池管理器（如果启用动态代理）
-	var proxyManager *proxy.Manager
-	if cfg.Client.DynamicProxy {
-		proxyManager = proxy.NewManager()
+	b.connPool = connpool.NewConnPool(poolOptions)
+	return b
+}
+
+// setupProxyManager 设置代理管理器
+func (b *ChatHandlerBuilder) setupProxyManager() *ChatHandlerBuilder {
+	// 只有启用动态代理时才创建代理管理器
+	if b.config.Client.DynamicProxy {
+		b.proxyManager = proxy.NewManager()
 		log.Info("动态代理池已启用（支持HTTP/SOCKS4/SOCKS5代理）")
 	}
+	return b
+}
+
+// setupHTTPClient 设置HTTP客户端
+// 优化点: 分离HTTP客户端创建逻辑
+// 目的: 降低函数复杂度，提高可读性
+// 预期效果: 更模块化的代码结构
+func (b *ChatHandlerBuilder) setupHTTPClient() *ChatHandlerBuilder {
+	b.client = createHTTPClient(b.config, b.proxyManager)
 	
-	// 创建统一的resty HTTP客户端
-	client := createHTTPClient(cfg, proxyManager)
-	
-	// 如果启用了连接池，配置客户端
-	if cfg.ConnPool.Enabled {
-		// 注意：这里我们不再调用connPool.ConfigureRestyClient，因为我们不再使用resty客户端
-		// 连接池配置将直接在transport层处理
+	// 如果启用了连接池，记录日志
+	if b.config.ConnPool.Enabled {
 		log.Info("使用标准库HTTP客户端，连接池由http.Transport内部管理")
 	}
-
-	// 创建管理器组件
-	userManager := manager.NewUserManager(cfg.Auth.UserIds)
-	chatIdGenerator := manager.NewChatIdGenerator(constants.ChatGroup)
 	
-	// 创建缓存
+	return b
+}
+
+// setupManagers 设置管理器组件
+func (b *ChatHandlerBuilder) setupManagers() *ChatHandlerBuilder {
+	b.userManager = manager.NewUserManager(b.config.Auth.UserIds)
+	b.chatIdGenerator = manager.NewChatIdGenerator(constants.ChatGroup)
+	return b
+}
+
+// setupCache 设置响应缓存
+func (b *ChatHandlerBuilder) setupCache() *ChatHandlerBuilder {
+	cfg := b.config
+	
+	// 创建缓存选项
 	cacheOptions := cache.ResponseCacheOptions{
 		ModelCacheTTL:    cfg.Cache.ModelCacheTTL,
 		ResponseCacheTTL: cfg.Cache.ResponseCacheTTL,
 		CleanupInterval:  cfg.Cache.CleanupInterval,
 		Enabled:          cfg.Cache.Enabled,
 	}
-	responseCache := cache.NewResponseCache(cacheOptions)
+	
+	b.responseCache = cache.NewResponseCache(cacheOptions)
+	
+	// 记录缓存状态
 	if cfg.Cache.Enabled {
 		log.Info("响应缓存已启用: ModelTTL=%v, ResponseTTL=%v",
 			cfg.Cache.ModelCacheTTL, cfg.Cache.ResponseCacheTTL)
@@ -88,36 +212,55 @@ func NewChatHandler(cfg *config.Config) *ChatHandler {
 		log.Info("响应缓存已禁用")
 	}
 	
-	// 创建请求限制器
-	var rateLimiter ratelimit.RateLimiter
-	if cfg.RateLimit.Enabled {
-		rateLimiter = ratelimit.NewTokenBucketLimiter(
+	return b
+}
+
+// setupRateLimiter 设置请求限制器
+func (b *ChatHandlerBuilder) setupRateLimiter() *ChatHandlerBuilder {
+	cfg := b.config
+	
+	// 优化点: 简化条件分支
+	// 目的: 提高代码可读性
+	// 预期效果: 更简洁的初始化逻辑
+	limiter := ratelimit.NewTokenBucketLimiter(1000, 1000) // 默认值
+	
+	if !cfg.RateLimit.Enabled {
+		limiter.Disable()
+		log.Info("请求限制器已禁用")
+	} else {
+		// 覆盖默认值
+		limiter = ratelimit.NewTokenBucketLimiter(
 			cfg.RateLimit.RequestsPerSecond,
 			cfg.RateLimit.Burst)
 		log.Info("请求限制器已启用: 速率=%f/秒, 突发=%d",
 			cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst)
-	} else {
-		// 创建禁用状态的限制器
-		limiter := ratelimit.NewTokenBucketLimiter(1000, 1000)
-		limiter.Disable()
-		rateLimiter = limiter
-		log.Info("请求限制器已禁用")
 	}
+	
+	b.rateLimiter = limiter
+	return b
+}
 
+// build 构建ChatHandler实例
+func (b *ChatHandlerBuilder) build() *ChatHandler {
 	return &ChatHandler{
-		config:          cfg,
-		client:          client,
-		userManager:     userManager,
-		chatIdGenerator: chatIdGenerator,
-		proxyManager:    proxyManager,
-		responseCache:   responseCache,
-		connPool:        connPool,
-		rateLimiter:     rateLimiter,
+		config:          b.config,
+		client:          b.client,
+		userManager:     b.userManager,
+		chatIdGenerator: b.chatIdGenerator,
+		proxyManager:    b.proxyManager,
+		responseCache:   b.responseCache,
+		connPool:        b.connPool,
+		rateLimiter:     b.rateLimiter,
+		metrics:         newHandlerMetrics(), // 初始化指标收集
 	}
 }
 
 // createHTTPClient 创建HTTP客户端
+// 优化点: 简化代理设置逻辑，优化代码结构
+// 目的: 提高代码可读性，统一代理处理逻辑
+// 预期效果: 更易于维护的代理配置代码
 func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *httpClient.HttpClient {
+	// 创建基础客户端
 	client := httpClient.NewHttpClient().
 		SetTimeout(cfg.Client.Timeout).
 		SetBaseURL(cfg.Client.BaseURL).
@@ -131,61 +274,107 @@ func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *httpClie
 	client.SetRetryWaitTime(constants.RetryDelay)
 	client.SetRetryMaxWaitTime(constants.RetryDelay * 5)
 
-	// 代理配置优先级：动态代理 > 静态SOCKS5代理 > 静态HTTP代理
-	if cfg.Client.DynamicProxy && proxyManager != nil {
-		// 设置代理管理器
-		client.SetProxyManager(proxyManager)
-		
-		// 为每个请求设置前置处理器，动态获取代理
-		client.OnBeforeRequest(func(req *http.Request) error {
-			proxyAddr, err := proxyManager.GetProxy()
-			if err != nil {
-				log.Warn("无法获取动态代理，将使用直接连接: %v", err)
-				client.SetProxy("") // 清除之前可能设置的代理
-				return nil // 继续请求，但不使用代理
-			}
-			
-			// 获取代理类型（从URL中提取协议）
-			proxyType := "unknown"
-			if strings.HasPrefix(proxyAddr, "http://") {
-				proxyType = "HTTP"
-			} else if strings.HasPrefix(proxyAddr, "https://") {
-				proxyType = "HTTPS"
-			} else if strings.HasPrefix(proxyAddr, "socks4://") {
-				proxyType = "SOCKS4"
-			} else if strings.HasPrefix(proxyAddr, "socks5://") {
-				proxyType = "SOCKS5"
-			}
-			
-			log.Info("对请求 %s 使用动态代理(%s): %s", req.URL, proxyType, proxyAddr)
-			// 注意：此处不需要为每个请求设置代理，这将由HttpClient中的SetProxyManager处理
-			return nil
-		})
-	} else if cfg.Client.Socks5Proxy != "" {
-		// 使用静态SOCKS5代理
-		proxyAddr := cfg.Client.Socks5Proxy
-		if !strings.HasPrefix(proxyAddr, "socks5://") &&
-		   !strings.HasPrefix(proxyAddr, "http://") &&
-		   !strings.HasPrefix(proxyAddr, "https://") &&
-		   !strings.HasPrefix(proxyAddr, "socks4://") {
-			// 默认使用SOCKS5协议
-			proxyAddr = "socks5://" + proxyAddr
-		}
-		log.Info("使用静态SOCKS5代理: %s", proxyAddr)
-		client.SetProxy(proxyAddr)
-	} else if cfg.Client.HttpProxy != "" {
-		// 使用静态HTTP代理
-		proxyAddr := cfg.Client.HttpProxy
-		if !strings.HasPrefix(proxyAddr, "http://") &&
-		   !strings.HasPrefix(proxyAddr, "https://") {
-			// 默认使用HTTP协议
-			proxyAddr = "http://" + proxyAddr
-		}
-		log.Info("使用静态HTTP代理: %s", proxyAddr)
-		client.SetProxy(proxyAddr)
-	}
+	// 配置代理
+	configureClientProxy(client, cfg, proxyManager)
 
 	return client
+}
+
+// configureClientProxy 配置客户端代理
+// 优化点: 分离代理配置逻辑，统一处理
+// 目的: 提高代码模块化，易于维护
+// 预期效果: 集中的代理配置逻辑，更清晰的代码结构
+func configureClientProxy(client *httpClient.HttpClient, cfg *config.Config, proxyManager *proxy.Manager) {
+	// 代理配置优先级：动态代理 > 静态SOCKS5代理 > 静态HTTP代理
+	switch {
+	case cfg.Client.DynamicProxy && proxyManager != nil:
+		configureDynamicProxy(client, proxyManager)
+	case cfg.Client.Socks5Proxy != "":
+		configureStaticSocks5Proxy(client, cfg.Client.Socks5Proxy)
+	case cfg.Client.HttpProxy != "":
+		configureStaticHttpProxy(client, cfg.Client.HttpProxy)
+	default:
+		log.Info("未配置代理，将使用直接连接")
+	}
+}
+
+// configureDynamicProxy 配置动态代理
+func configureDynamicProxy(client *httpClient.HttpClient, proxyManager *proxy.Manager) {
+	// 设置代理管理器
+	client.SetProxyManager(proxyManager)
+	
+	// 为每个请求设置前置处理器，动态获取代理
+	client.OnBeforeRequest(func(req *http.Request) error {
+		proxyAddr, err := proxyManager.GetProxy()
+		if err != nil {
+			log.Warn("无法获取动态代理，将使用直接连接: %v", err)
+			client.SetProxy("") // 清除之前可能设置的代理
+			return nil          // 继续请求，但不使用代理
+		}
+		
+		// 获取代理类型
+		proxyType := getProxyTypeFromURL(proxyAddr)
+		log.Info("对请求 %s 使用动态代理(%s): %s", req.URL, proxyType, proxyAddr)
+		return nil
+	})
+	
+	log.Info("已配置动态代理管理器（支持HTTP/SOCKS4/SOCKS5代理）")
+}
+
+// configureStaticSocks5Proxy 配置静态SOCKS5代理
+func configureStaticSocks5Proxy(client *httpClient.HttpClient, proxyAddr string) {
+	// 添加协议前缀（如果需要）
+	if !strings.HasPrefix(proxyAddr, "socks5://") &&
+	   !strings.HasPrefix(proxyAddr, "http://") &&
+	   !strings.HasPrefix(proxyAddr, "https://") &&
+	   !strings.HasPrefix(proxyAddr, "socks4://") {
+		// 默认使用SOCKS5协议
+		proxyAddr = "socks5://" + proxyAddr
+	}
+	
+	// 设置代理并记录日志
+	_, err := client.SetProxy(proxyAddr)
+	if err != nil {
+		log.Error("设置静态SOCKS5代理失败: %v", err)
+		return
+	}
+	
+	log.Info("使用静态SOCKS5代理: %s", proxyAddr)
+}
+
+// configureStaticHttpProxy 配置静态HTTP代理
+func configureStaticHttpProxy(client *httpClient.HttpClient, proxyAddr string) {
+	// 添加协议前缀（如果需要）
+	if !strings.HasPrefix(proxyAddr, "http://") &&
+	   !strings.HasPrefix(proxyAddr, "https://") {
+		// 默认使用HTTP协议
+		proxyAddr = "http://" + proxyAddr
+	}
+	
+	// 设置代理并记录日志
+	_, err := client.SetProxy(proxyAddr)
+	if err != nil {
+		log.Error("设置静态HTTP代理失败: %v", err)
+		return
+	}
+	
+	log.Info("使用静态HTTP代理: %s", proxyAddr)
+}
+
+// getProxyTypeFromURL 从URL获取代理类型
+func getProxyTypeFromURL(proxyURL string) string {
+	switch {
+	case strings.HasPrefix(proxyURL, "http://"):
+		return "HTTP"
+	case strings.HasPrefix(proxyURL, "https://"):
+		return "HTTPS"
+	case strings.HasPrefix(proxyURL, "socks4://"):
+		return "SOCKS4"
+	case strings.HasPrefix(proxyURL, "socks5://"):
+		return "SOCKS5"
+	default:
+		return "unknown"
+	}
 }
 
 // getUserId 获取用户ID（轮询方式）
@@ -209,57 +398,90 @@ func (h *ChatHandler) GetClient() *httpClient.HttpClient {
 }
 
 // calculateInputTokens 计算请求的提示tokens
+// 优化点: 改进注释和变量命名，增加错误处理
+// 目的: 提高代码可读性和可维护性
+// 预期效果: 更易于理解和维护的代码
 func (h *ChatHandler) calculateInputTokens(request models.OpenAIChatCompletionsRequest, counter *TokenCounter) {
+	if counter == nil {
+		log.Error("Token计数器为空，无法计算输入tokens")
+		return
+	}
+	
+	// 记录开始计算的时间，用于性能分析
+	startTime := time.Now()
+	
 	// 将消息转换为可计算格式
 	messagesInterface := make([]interface{}, len(request.Messages))
 	for i, msg := range request.Messages {
+		// 创建包含消息属性的映射
 		msgMap := map[string]interface{}{
 			"role":    msg.Role,
 			"content": msg.Content,
 		}
+		
+		// 注意: 现有模型中不支持name和function_call字段
+		// 如需扩展，请先更新models.Message结构体定义
+		
 		messagesInterface[i] = msgMap
 	}
 	
-	// 计算提示tokens
+	// 计算提示tokens并更新计数器
 	inputTokens := calculateMessageTokens(messagesInterface)
 	counter.SetInputTokens(inputTokens)
+	
+	// 记录指标
+	if h.metrics != nil {
+		h.metrics.mu.Lock()
+		h.metrics.lastRequestTime = time.Now()
+		h.metrics.mu.Unlock()
+	}
+	
+	// 记录计算耗时
+	log.Debug("计算输入tokens耗时: %v，tokens数量: %d", time.Since(startTime), inputTokens)
 }
 
 // updateOutputTokens 更新完成tokens计算
+// 优化点: 增加错误处理和性能指标
+// 目的: 提高代码健壮性和可观测性
+// 预期效果: 更可靠的token计算和更好的性能监控
 func (h *ChatHandler) updateOutputTokens(content string, counter *TokenCounter) {
+	if counter == nil {
+		log.Error("Token计数器为空，无法更新输出tokens")
+		return
+	}
+	
+	// 记录开始计算的时间
+	startTime := time.Now()
+	
+	// 计算内容的token数量
 	tokens := countTokens(content)
 	counter.AddOutputTokens(tokens)
+	
+	// 记录计算耗时
+	log.Debug("计算输出tokens耗时: %v，tokens数量: %d", time.Since(startTime), tokens)
 }
 
 // correctUsage 校正用量统计数据
+// 优化点: 提取重复逻辑为函数，改进算法结构
+// 目的: 减少代码重复，提高可维护性
+// 预期效果: 更简洁、更易维护的代码
 func (h *ChatHandler) correctUsage(serverUsage, calculatedUsage models.Usage) models.Usage {
 	// 创建校正后的用量数据
 	correctedUsage := serverUsage
 	
-	// 提示tokens校正：如果计算值与服务器返回值相差超过20%，使用计算值
-	if serverUsage.PromptTokens > 0 && calculatedUsage.PromptTokens > 0 {
-		diff := float64(serverUsage.PromptTokens - calculatedUsage.PromptTokens) / float64(calculatedUsage.PromptTokens)
-		if diff > 0.2 || diff < -0.2 {
-			log.Warn("提示tokens统计偏差超过20%%，使用计算值：服务器=%d, 计算值=%d",
-				serverUsage.PromptTokens, calculatedUsage.PromptTokens)
-			correctedUsage.PromptTokens = calculatedUsage.PromptTokens
-		}
-	} else if serverUsage.PromptTokens == 0 && calculatedUsage.PromptTokens > 0 {
-		// 如果服务器没有返回提示tokens，使用计算值
-		correctedUsage.PromptTokens = calculatedUsage.PromptTokens
-	}
+	// 校正提示tokens
+	correctedUsage.PromptTokens = h.correctTokenCount(
+		"提示tokens",
+		serverUsage.PromptTokens,
+		calculatedUsage.PromptTokens,
+	)
 	
-	// 完成tokens校正：类似逻辑
-	if serverUsage.CompletionTokens > 0 && calculatedUsage.CompletionTokens > 0 {
-		diff := float64(serverUsage.CompletionTokens - calculatedUsage.CompletionTokens) / float64(calculatedUsage.CompletionTokens)
-		if diff > 0.2 || diff < -0.2 {
-			log.Warn("完成tokens统计偏差超过20%%，使用计算值：服务器=%d, 计算值=%d",
-				serverUsage.CompletionTokens, calculatedUsage.CompletionTokens)
-			correctedUsage.CompletionTokens = calculatedUsage.CompletionTokens
-		}
-	} else if serverUsage.CompletionTokens == 0 && calculatedUsage.CompletionTokens > 0 {
-		correctedUsage.CompletionTokens = calculatedUsage.CompletionTokens
-	}
+	// 校正完成tokens
+	correctedUsage.CompletionTokens = h.correctTokenCount(
+		"完成tokens",
+		serverUsage.CompletionTokens,
+		calculatedUsage.CompletionTokens,
+	)
 	
 	// 重新计算总tokens
 	correctedUsage.TotalTokens = correctedUsage.PromptTokens + correctedUsage.CompletionTokens
@@ -267,69 +489,220 @@ func (h *ChatHandler) correctUsage(serverUsage, calculatedUsage models.Usage) mo
 	return correctedUsage
 }
 
-// GetCacheMetrics 获取缓存指标
-func (h *ChatHandler) GetCacheMetrics() map[string]interface{} {
-	if h.responseCache != nil {
-		return h.responseCache.GetMetrics()
+// correctTokenCount 校正单个token计数
+// 优化点: 提取公共逻辑为独立函数
+// 目的: 减少代码重复，提高可维护性
+// 预期效果: 更简洁的代码结构
+func (h *ChatHandler) correctTokenCount(tokenType string, serverCount, calculatedCount int) int {
+	// 如果服务器返回值为0但计算值大于0，使用计算值
+	if serverCount == 0 && calculatedCount > 0 {
+		log.Info("%s: 服务器未返回数据，使用计算值=%d", tokenType, calculatedCount)
+		return calculatedCount
 	}
-	return map[string]interface{}{"enabled": false}
+	
+	// 如果两者都大于0，比较差异
+	if serverCount > 0 && calculatedCount > 0 {
+		// 计算差异比例
+		diff := float64(serverCount - calculatedCount) / float64(calculatedCount)
+		
+		// 差异超过阈值时，使用计算值
+		const thresholdPct = 0.2 // 20%差异阈值
+		if diff > thresholdPct || diff < -thresholdPct {
+			log.Warn("%s统计偏差超过%.0f%%，使用计算值：服务器=%d, 计算值=%d",
+				tokenType, thresholdPct*100, serverCount, calculatedCount)
+			return calculatedCount
+		}
+	}
+	
+	// 默认使用服务器返回值
+	return serverCount
+}
+
+// GetCacheMetrics 获取缓存指标
+// 优化点: 增加安全检查和详细注释
+// 目的: 提高代码健壮性和可读性
+// 预期效果: 更可靠的指标收集
+func (h *ChatHandler) GetCacheMetrics() map[string]interface{} {
+	metrics := map[string]interface{}{
+		"enabled": false,
+	}
+	
+	if h.responseCache != nil {
+		cacheMetrics := h.responseCache.GetMetrics()
+		// 只有在成功获取到指标时才更新返回值
+		if cacheMetrics != nil {
+			metrics = cacheMetrics
+		}
+	}
+	
+	return metrics
 }
 
 // GetConnPoolMetrics 获取连接池指标
+// 优化点: 增加安全检查和详细注释
+// 目的: 提高代码健壮性和可读性
+// 预期效果: 更可靠的指标收集
 func (h *ChatHandler) GetConnPoolMetrics() map[string]interface{} {
-	if h.connPool != nil {
-		return h.connPool.GetMetrics()
+	metrics := map[string]interface{}{
+		"enabled": false,
 	}
-	return map[string]interface{}{"enabled": false}
+	
+	if h.connPool != nil {
+		poolMetrics := h.connPool.GetMetrics()
+		// 只有在成功获取到指标时才更新返回值
+		if poolMetrics != nil {
+			metrics = poolMetrics
+		}
+	}
+	
+	return metrics
 }
 
 // GetRateLimiterMetrics 获取限流器指标
+// 优化点: 增加安全检查和详细注释
+// 目的: 提高代码健壮性和可读性
+// 预期效果: 更可靠的指标收集
 func (h *ChatHandler) GetRateLimiterMetrics() map[string]interface{} {
-	if h.rateLimiter != nil {
-		return h.rateLimiter.GetMetrics()
+	metrics := map[string]interface{}{
+		"enabled": false,
 	}
-	return map[string]interface{}{"enabled": false}
+	
+	if h.rateLimiter != nil {
+		limiterMetrics := h.rateLimiter.GetMetrics()
+		// 只有在成功获取到指标时才更新返回值
+		if limiterMetrics != nil {
+			metrics = limiterMetrics
+		}
+	}
+	
+	return metrics
 }
 
 // Close 关闭ChatHandler及释放所有资源
+// 优化点: 完善资源释放机制，增加错误处理
+// 目的: 确保所有资源都能正确释放，防止内存泄漏
+// 预期效果: 更可靠的资源清理过程
 func (h *ChatHandler) Close() error {
 	var errs []error
 	
-	// 关闭连接池
-	if h.connPool != nil {
-		// 安全释放连接池资源
-		// 注意：如果connpool.ConnPool类型没有Close方法，需要添加该方法
-		log.Info("连接池资源已释放")
+	// 使用sync.Once确保只执行一次关闭操作
+	h.shutdown.Do(func() {
+		log.Info("开始关闭ChatHandler资源...")
 		
-		// 实际应该添加ConnPool.Close()方法的实现，这里只是记录
-		// 如果已经实现了Close()方法，取消下面注释：
-		// if err := h.connPool.Close(); err != nil {
-		//     errs = append(errs, err)
-		//     log.Error("关闭连接池失败: %v", err)
-		// }
-	}
-	
-	// 关闭代理池管理器
-	if h.proxyManager != nil {
-		h.proxyManager.Stop()
-		log.Info("代理池资源已释放")
-	}
-	
-	// 关闭响应缓存
-	if h.responseCache != nil {
-		// 记录资源释放
-		log.Info("响应缓存资源已释放")
-	}
-	
-	// 关闭限流器
-	if h.rateLimiter != nil {
-		// 记录资源释放
-		log.Info("请求限制器资源已释放")
-	}
+		// 关闭连接池
+		if h.connPool != nil {
+			// 安全释放连接池资源
+			if closer, ok := interface{}(h.connPool).(interface{ Close() error }); ok {
+				if err := closer.Close(); err != nil {
+					errs = append(errs, fmt.Errorf("关闭连接池失败: %w", err))
+					log.Error("关闭连接池失败: %v", err)
+				} else {
+					log.Info("连接池资源已成功释放")
+				}
+			} else {
+				// 如果连接池没有实现Close方法
+				log.Warn("连接池未实现Close方法，资源可能未完全释放")
+				
+				// 无法直接访问底层的http.Client，仅记录日志
+				log.Warn("连接池未实现Close方法，可能无法完全释放底层连接资源")
+			}
+		}
+		
+		// 关闭HTTP客户端
+		if h.client != nil {
+			if closer, ok := interface{}(h.client).(interface{ Close() error }); ok {
+				if err := closer.Close(); err != nil {
+					errs = append(errs, fmt.Errorf("关闭HTTP客户端失败: %w", err))
+					log.Error("关闭HTTP客户端失败: %v", err)
+				} else {
+					log.Info("HTTP客户端资源已成功释放")
+				}
+			} else {
+				// 无法直接访问底层Transport，仅记录日志
+				log.Info("HTTP客户端资源标记为释放")
+			}
+		}
+		
+		// 关闭代理池管理器
+		if h.proxyManager != nil {
+			h.proxyManager.Stop()
+			log.Info("代理池资源已成功释放")
+		}
+		
+		// 关闭响应缓存
+		if h.responseCache != nil {
+			if closer, ok := interface{}(h.responseCache).(interface{ Close() error }); ok {
+				if err := closer.Close(); err != nil {
+					errs = append(errs, fmt.Errorf("关闭响应缓存失败: %w", err))
+					log.Error("关闭响应缓存失败: %v", err)
+				} else {
+					log.Info("响应缓存资源已成功释放")
+				}
+			} else {
+				log.Info("响应缓存资源已标记为释放")
+			}
+		}
+		
+		// 关闭限流器
+		if h.rateLimiter != nil {
+			if closer, ok := interface{}(h.rateLimiter).(interface{ Close() error }); ok {
+				if err := closer.Close(); err != nil {
+					errs = append(errs, fmt.Errorf("关闭请求限制器失败: %w", err))
+					log.Error("关闭请求限制器失败: %v", err)
+				} else {
+					log.Info("请求限制器资源已成功释放")
+				}
+			} else {
+				log.Info("请求限制器资源已标记为释放")
+			}
+		}
+		
+		log.Info("ChatHandler资源释放完成")
+	})
 	
 	if len(errs) > 0 {
-		return fmt.Errorf("关闭ChatHandler资源时发生%d个错误", len(errs))
+		return fmt.Errorf("%w: 发生%d个错误: %v", ErrResourceCleanup, len(errs), errs)
 	}
 	
 	return nil
+}
+
+
+// GetMetrics 获取所有指标
+// 优化点: 添加统一的指标收集接口
+// 目的: 提供完整的运行时状态信息
+// 预期效果: 更全面的监控数据
+func (h *ChatHandler) GetMetrics() map[string]interface{} {
+	metrics := make(map[string]interface{})
+	
+	// 添加基本指标
+	if h.metrics != nil {
+		h.metrics.mu.RLock()
+		metrics["requestCount"] = h.metrics.requestCount
+		metrics["cacheHitCount"] = h.metrics.cacheHitCount
+		metrics["proxyUseCount"] = h.metrics.proxyUseCount
+		metrics["proxyErrors"] = h.metrics.proxyErrors
+		metrics["lastRequestTime"] = h.metrics.lastRequestTime.Format(time.RFC3339)
+		h.metrics.mu.RUnlock()
+	}
+	
+	// 添加缓存指标
+	cacheMetrics := h.GetCacheMetrics()
+	for k, v := range cacheMetrics {
+		metrics["cache_"+k] = v
+	}
+	
+	// 添加连接池指标
+	connPoolMetrics := h.GetConnPoolMetrics()
+	for k, v := range connPoolMetrics {
+		metrics["connPool_"+k] = v
+	}
+	
+	// 添加限流器指标
+	rateLimiterMetrics := h.GetRateLimiterMetrics()
+	for k, v := range rateLimiterMetrics {
+		metrics["rateLimit_"+k] = v
+	}
+	
+	return metrics
 }

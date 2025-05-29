@@ -17,14 +17,14 @@ import (
 
 // Request 请求构建器
 type Request struct {
-	client           *HttpClient
-	method           string
-	url              string
-	headers          map[string]string
-	queryParams      map[string]string
-	body             io.Reader
+	client             *HttpClient
+	method             string
+	url                string
+	headers            map[string]string
+	queryParams        map[string]string
+	body               io.Reader
 	doNotParseResponse bool
-	context          context.Context
+	context            context.Context
 }
 
 // SetHeader 设置请求头
@@ -56,6 +56,7 @@ func (r *Request) SetQueryParams(params map[string]string) *Request {
 }
 
 // SetBody 设置请求体
+// 优化: 仅当未设置Content-Type时才设置，避免不必要的头部覆盖
 func (r *Request) SetBody(body interface{}) *Request {
 	switch v := body.(type) {
 	case string:
@@ -69,8 +70,10 @@ func (r *Request) SetBody(body interface{}) *Request {
 		data, err := json.Marshal(body)
 		if err == nil {
 			r.body = bytes.NewReader(data)
-			// 设置Content-Type
-			r.SetHeader("Content-Type", "application/json")
+			// 仅当未设置Content-Type时才设置
+			if _, hasContentType := r.headers["Content-Type"]; !hasContentType {
+				r.SetHeader("Content-Type", "application/json")
+			}
 		}
 	}
 	return r
@@ -88,265 +91,292 @@ func (r *Request) SetDoNotParseResponse(flag bool) *Request {
 	return r
 }
 
+// buildFullURL 构建完整URL
+// 优化: 将URL构建逻辑分离为独立函数，简化条件判断，提高可读性
+func (r *Request) buildFullURL(path string) string {
+	// 如果路径已经是完整URL，直接使用
+	if strings.HasPrefix(path, "http") {
+		return path
+	}
+	
+	// 如果没有基础URL，直接使用path
+	if r.client.baseURL == "" {
+		return path
+	}
+	
+	// 处理基础URL和路径的斜杠问题
+	baseEndsWithSlash := strings.HasSuffix(r.client.baseURL, "/")
+	pathStartsWithSlash := strings.HasPrefix(path, "/")
+	
+	switch {
+	case baseEndsWithSlash && pathStartsWithSlash:
+		return r.client.baseURL + path[1:]
+	case !baseEndsWithSlash && !pathStartsWithSlash:
+		return r.client.baseURL + "/" + path
+	default:
+		return r.client.baseURL + path
+	}
+}
+
+// addQueryParams 添加查询参数到URL
+// 优化: 将查询参数逻辑分离，提高代码清晰度和可维护性
+func (r *Request) addQueryParams(urlStr string) string {
+	if len(r.queryParams) == 0 {
+		return urlStr
+	}
+	
+	// 解析原始URL
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		// 如果解析失败，使用简单方式添加
+		separator := "?"
+		if strings.Contains(urlStr, "?") {
+			separator = "&"
+		}
+		
+		// 手动构建查询参数
+		var parts []string
+		for k, v := range r.queryParams {
+			parts = append(parts, k+"="+v)
+		}
+		
+		return urlStr + separator + strings.Join(parts, "&")
+	}
+	
+	// 获取现有查询参数
+	query := parsedURL.Query()
+	
+	// 添加新的查询参数
+	for k, v := range r.queryParams {
+		query.Add(k, v)
+	}
+	
+	// 更新URL的查询部分
+	parsedURL.RawQuery = query.Encode()
+	
+	return parsedURL.String()
+}
+
+// prepareRequest 创建并准备HTTP请求对象
+// 优化: 将请求准备逻辑封装为单独函数，简化Execute方法
+func (r *Request) prepareRequest(fullURL string) (*http.Request, error) {
+	// 创建请求
+	req, err := http.NewRequest(r.method, fullURL, r.body)
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %w", err)
+	}
+	
+	// 应用上下文
+	if r.context != nil {
+		req = req.WithContext(r.context)
+	}
+	
+	// 设置头信息 - 先设置客户端默认头
+	for k, v := range r.client.headers {
+		req.Header.Set(k, v)
+	}
+	
+	// 然后设置请求特定头
+	for k, v := range r.headers {
+		req.Header.Set(k, v)
+	}
+	
+	// 设置随机User-Agent(如果未指定)
+	if _, hasUserAgent := req.Header["User-Agent"]; !hasUserAgent {
+		req.Header.Set("User-Agent", constants.GetRandomUserAgent())
+	}
+	
+	// 应用请求前处理函数
+	for _, f := range r.client.beforeRequest {
+		if err := f(req); err != nil {
+			return nil, fmt.Errorf("请求前处理失败: %w", err)
+		}
+	}
+	
+	return req, nil
+}
+
+// sendRequest 发送请求并处理响应
+// 优化: 统一请求执行逻辑，减少代码重复，统一错误处理
+func (r *Request) sendRequest(client *http.Client, req *http.Request, proxyType, proxyAddr string) (*Response, error) {
+	// 记录请求开始
+	log.Info("使用%s发送请求: %s", proxyType, proxyAddr)
+	
+	// 执行请求
+	httpResp, err := client.Do(req)
+	if err != nil {
+		log.Warn("%s请求失败: %v", proxyType, err)
+		return nil, fmt.Errorf("%s请求失败: %w", proxyType, err)
+	}
+	
+	log.Info("%s请求成功，状态码: %d", proxyType, httpResp.StatusCode)
+	
+	// 创建响应对象
+	resp := &Response{
+		httpResp: httpResp,
+		request:  req,
+	}
+	
+	// 如果不需要解析响应体，直接返回
+	if r.doNotParseResponse {
+		log.Info("请求完成，使用: %s (%s)", proxyType, proxyAddr)
+		return resp, nil
+	}
+	
+	// 解析响应体
+	if err := resp.parseBody(); err != nil {
+		resp.httpResp.Body.Close()
+		log.Warn("解析%s响应失败: %v", proxyType, err)
+		return nil, fmt.Errorf("解析%s响应失败: %w", proxyType, err)
+	}
+	
+	log.Info("请求完成，使用: %s (%s)", proxyType, proxyAddr)
+	return resp, nil
+}
+
+// tryDynamicProxy 尝试使用动态代理
+// 优化: 将动态代理逻辑封装为独立函数，便于维护和测试
+func (r *Request) tryDynamicProxy(req *http.Request) (*Response, error) {
+	if !r.client.dynamicProxy || r.client.proxyManager == nil {
+		return nil, fmt.Errorf("动态代理未启用或代理管理器未配置")
+	}
+	
+	// 获取动态代理地址
+	log.Info("尝试获取动态代理...")
+	proxyAddr, err := r.client.proxyManager.GetProxy()
+	if err != nil {
+		log.Warn("动态代理管理器获取代理失败: %v", err)
+		return nil, fmt.Errorf("获取动态代理失败: %w", err)
+	}
+	
+	log.Info("成功获取动态代理: %s", proxyAddr)
+	
+	// 解析代理URL
+	proxyURL, err := url.Parse(proxyAddr)
+	if err != nil {
+		log.Warn("解析动态代理地址 %s 失败: %v", proxyAddr, err)
+		return nil, fmt.Errorf("解析动态代理地址失败: %w", err)
+	}
+	
+	// 创建临时Transport和Client
+	// 优化: 只设置必要的Transport配置，减少内存分配
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+	}
+	
+	tempClient := &http.Client{
+		Transport: transport,
+		Timeout:   r.client.timeout,
+	}
+	
+	// 使用临时客户端执行请求
+	return r.sendRequest(tempClient, req, "动态代理", proxyAddr)
+}
+
+// tryStaticProxy 尝试使用静态代理
+// 优化: 将静态代理逻辑封装为独立函数，提高代码可读性
+func (r *Request) tryStaticProxy(req *http.Request) (*Response, error) {
+	if r.client.proxyURL == "" {
+		return nil, fmt.Errorf("静态代理未配置")
+	}
+	
+	log.Info("尝试使用静态代理: %s", r.client.proxyURL)
+	
+	// 使用已配置代理的客户端执行请求
+	return r.sendRequest(r.client.client, req, "静态代理", r.client.proxyURL)
+}
+
+// tryDirectConnection 尝试直接连接
+// 优化: 将直接连接逻辑封装为独立函数，统一代理处理流程
+func (r *Request) tryDirectConnection(req *http.Request) (*Response, error) {
+	log.Info("尝试使用直接连接发送请求")
+	
+	// 使用标准客户端执行请求
+	return r.sendRequest(r.client.client, req, "直接连接", "无代理")
+}
+
 // Execute 执行请求
+// 优化: 将超过250行的大方法拆分为多个职责单一的小函数，提高可读性和可维护性
 func (r *Request) Execute(method, path string) (*Response, error) {
 	r.method = method
 	
 	// 构建完整URL
-	fullURL := path
-	if !strings.HasPrefix(path, "http") {
-		if r.client.baseURL != "" {
-			if strings.HasSuffix(r.client.baseURL, "/") && strings.HasPrefix(path, "/") {
-				fullURL = r.client.baseURL + path[1:]
-			} else if !strings.HasSuffix(r.client.baseURL, "/") && !strings.HasPrefix(path, "/") {
-				fullURL = r.client.baseURL + "/" + path
-			} else {
-				fullURL = r.client.baseURL + path
-			}
-		}
-	}
+	fullURL := r.buildFullURL(path)
 	r.url = fullURL
 	
 	// 添加查询参数
-	if len(r.queryParams) > 0 {
-		if strings.Contains(fullURL, "?") {
-			fullURL += "&"
-		} else {
-			fullURL += "?"
-		}
-		
-		params := url.Values{}
-		for k, v := range r.queryParams {
-			params.Add(k, v)
-		}
-		fullURL += params.Encode()
-	}
+	fullURL = r.addQueryParams(fullURL)
+	
+	// 记录请求开始
+	log.Info("开始处理请求: %s %s", method, fullURL)
+	
+	// 初始化重试计数和最后一个错误
+	attempts := r.client.retryCount + 1
+	var lastErr error
 	
 	// 重试逻辑
-	var resp *Response
-	var err error // Declare err here to be in scope for the loop and return
-	
-	attempts := r.client.retryCount + 1
 	for attempt := 0; attempt < attempts; attempt++ {
-		// Reset err for each attempt to avoid carrying over errors from previous attempts
-		// if those attempts didn't result in a return.
-		// However, the primary error from client.Do or parsing should be what's checked.
-		// Let's ensure 'err' is fresh or explicitly handled.
-		// For now, we rely on assignments within the loop to set 'err'.
-
+		// 如果不是第一次尝试，等待后重试
 		if attempt > 0 {
-			// 计算重试等待时间
+			// 计算重试等待时间（包含抖动）
 			waitTime := r.client.retryWait
 			if r.client.retryMaxWait > r.client.retryWait {
 				maxJitter := r.client.retryMaxWait - r.client.retryWait
 				waitTime += time.Duration(rand.Int63n(int64(maxJitter)))
 			}
 			
-			// 等待后重试
+			log.Warn("请求尝试 %d/%d 失败: %v. 等待 %v 后重试...",
+				attempt+1, attempts, lastErr, waitTime)
+			
+			// 等待后重试，支持上下文取消
 			select {
 			case <-time.After(waitTime):
 			case <-r.context.Done():
-				return nil, r.context.Err()
+				return nil, fmt.Errorf("请求被取消: %w", r.context.Err())
 			}
 		}
 		
-		// 创建请求
-		req, err_req := http.NewRequest(method, fullURL, r.body)
-		if err_req != nil {
-			err = err_req // Assign to the loop-scoped err
+		// 创建新的请求对象
+		req, err := r.prepareRequest(fullURL)
+		if err != nil {
+			lastErr = err
 			continue
 		}
 		
-		// 应用上下文
-		if r.context != nil {
-			req = req.WithContext(r.context)
-		}
-		
-		// 设置头信息
-		// 首先设置客户端默认头
-		for k, v := range r.client.headers {
-			req.Header.Set(k, v)
-		}
-		// 然后设置请求特定头
-		for k, v := range r.headers {
-			req.Header.Set(k, v)
-		}
-		
-		// 设置随机User-Agent
-		if _, ok := req.Header["User-Agent"]; !ok {
-			req.Header.Set("User-Agent", constants.GetRandomUserAgent())
-		}
-		
-		// 应用请求前处理函数
-		if len(r.client.beforeRequest) > 0 {
-			for _, f := range r.client.beforeRequest {
-				if err := f(req); err != nil {
-					return nil, err
-				}
-			}
-		}
-		
-		// 记录请求开始的日志
-		log.Info("开始处理请求: %s %s", method, fullURL)
-		
 		// 代理处理策略：先尝试动态代理，再尝试静态代理，最后使用标准客户端
-		var proxyUsed bool = false
-		var usedProxyType string = "无"
-		var usedProxyAddr string = "直接连接"
-		// httpResp will be part of 'resp' which is declared outside the loop.
-		// 'err' is also declared outside the loop.
-
-		// 1. 尝试使用动态代理 (如果启用)
+		var resp *Response
+		
+		// 1. 尝试动态代理（如果已启用）
 		if r.client.dynamicProxy && r.client.proxyManager != nil {
-			log.Info("尝试获取动态代理...")
-			if proxyAddr, getProxyErr := r.client.proxyManager.GetProxy(); getProxyErr == nil { // Shadow 'err' for this block
-				log.Info("成功获取动态代理: %s", proxyAddr)
-				transport := &http.Transport{}
-				proxyURLVal, parseProxyErr := url.Parse(proxyAddr)
-				if parseProxyErr == nil {
-					transport.Proxy = http.ProxyURL(proxyURLVal)
-					
-					tempClient := &http.Client{
-						Transport: transport,
-						Timeout:   r.client.timeout,
-					}
-					
-					log.Info("使用动态代理发送请求: %s", proxyAddr)
-					var dynHttpResp *http.Response
-					dynHttpResp, err = tempClient.Do(req) // Assign to loop-scoped 'err'
-
-					if err == nil {
-						log.Info("动态代理请求成功，状态码: %d", dynHttpResp.StatusCode)
-						proxyUsed = true
-						usedProxyType = "动态代理"
-						usedProxyAddr = proxyAddr
-						resp = &Response{
-							httpResp: dynHttpResp,
-							request:  req,
-						}
-						if !r.doNotParseResponse {
-							if parseErr := resp.parseBody(); parseErr != nil {
-								resp.httpResp.Body.Close()
-								proxyUsed = false
-								usedProxyType = "无"
-								usedProxyAddr = "直接连接"
-								log.Warn("解析动态代理响应失败: %v", parseErr)
-								err = parseErr
-							} else {
-								log.Info("请求完成，使用: %s (%s)", usedProxyType, usedProxyAddr)
-								return resp, nil // Dynamic proxy success
-							}
-						} else {
-							log.Info("请求完成，使用: %s (%s)", usedProxyType, usedProxyAddr)
-							return resp, nil // Dynamic proxy success (no parsing)
-						}
-					} else {
-						log.Warn("动态代理请求失败: %v", err)
-					}
-					// If dynamic proxy HTTP call failed, 'err' is set. Loop continues.
-				} else {
-					log.Warn("解析动态代理地址 %s 失败: %v", proxyAddr, parseProxyErr)
-					// err = parseProxyErr // Optionally set loop 'err'
-				}
-			} else {
-				log.Warn("动态代理管理器获取代理失败: %v", getProxyErr)
-				// err = getProxyErr // Optionally set loop 'err'
-			}
-		}
-
-		// 2. 如果动态代理未启用/失败 (proxyUsed is false) 且配置了静态代理，则尝试静态代理
-		if !proxyUsed && r.client.proxyURL != "" {
-			log.Info("尝试使用静态代理: %s", r.client.proxyURL)
-			// 静态代理已通过 SetProxy 方法配置到 r.client.client (the main client)
-			// Its transport is already configured.
-			var staticHttpResp *http.Response
-			staticHttpResp, err = r.client.client.Do(req) // Use the main client
-
+			resp, err = r.tryDynamicProxy(req)
 			if err == nil {
-				log.Info("静态代理请求成功，状态码: %d", staticHttpResp.StatusCode)
-				proxyUsed = true
-				usedProxyType = "静态代理"
-				usedProxyAddr = r.client.proxyURL
-				resp = &Response{
-					httpResp: staticHttpResp,
-					request:  req,
-				}
-				if !r.doNotParseResponse {
-					if parseErr := resp.parseBody(); parseErr != nil {
-						resp.httpResp.Body.Close()
-						proxyUsed = false
-						usedProxyType = "无"
-						usedProxyAddr = "直接连接"
-						log.Warn("解析静态代理响应失败: %v", parseErr)
-						err = parseErr
-					} else {
-						log.Info("请求完成，使用: %s (%s)", usedProxyType, usedProxyAddr)
-						return resp, nil // Static proxy success
-					}
-				} else {
-					log.Info("请求完成，使用: %s (%s)", usedProxyType, usedProxyAddr)
-					return resp, nil // Static proxy success (no parsing)
-				}
-			} else {
-				log.Warn("静态代理请求失败: %v", err)
+				return resp, nil
 			}
-			// If static proxy HTTP call failed, 'err' is set. Loop continues.
+			// 动态代理失败，继续尝试下一种连接方式
 		}
 		
-		// 3. 如果动态代理和静态代理都未使用或失败 (proxyUsed is false)，则使用标准客户端 (无显式代理或已配置的静态代理)
-		if !proxyUsed {
-			// If we are here, it means either:
-			// - No dynamic proxy was configured/successful.
-			// - No static proxy was configured.
-			// - Static proxy was configured, but the attempt failed (err from client.Do or parseBody).
-			// We use r.client.client, which is the original client. If a static proxy was set via SetProxy,
-			// r.client.client.Transport would already be configured with it.
-			// If SetProxy was called with an empty string, r.client.client.Transport would be cleared of proxy.
-			// So, this step effectively becomes "use the client as it is currently configured".
-			// If a static proxy was attempted and failed above, 'err' would hold that error.
-			// If no proxy was attempted, 'err' might be nil or from req creation.
-
-			// We only proceed if 'err' from previous proxy attempts allows for a non-proxy attempt.
-			// Or, more simply, always try the direct/default client if no proxy attempt succeeded.
-			
-			log.Info("尝试使用直接连接发送请求")
-			var directHttpResp *http.Response
-			directHttpResp, err = r.client.client.Do(req) // This uses the client's current transport
-
+		// 2. 尝试静态代理（如果已配置）
+		if r.client.proxyURL != "" {
+			resp, err = r.tryStaticProxy(req)
 			if err == nil {
-				log.Info("直接连接请求成功，状态码: %d", directHttpResp.StatusCode)
-				resp = &Response{
-					httpResp: directHttpResp,
-					request:  req,
-				}
-				if !r.doNotParseResponse {
-					if parseErr := resp.parseBody(); parseErr != nil {
-						resp.httpResp.Body.Close()
-						log.Warn("解析直接连接响应失败: %v", parseErr)
-						err = parseErr // This error will be used for the retry loop or final return
-						// continue // Let the loop handle retry based on 'err'
-					} else {
-						log.Info("请求完成，使用: 直接连接")
-						return resp, nil // Success
-					}
-				} else {
-					log.Info("请求完成，使用: 直接连接")
-					return resp, nil // Success (no parsing needed)
-				}
-			} else {
-				log.Warn("直接连接请求失败: %v", err)
+				return resp, nil
 			}
-			// If r.client.client.Do(req) failed, 'err' is set.
+			// 静态代理失败，继续尝试下一种连接方式
 		}
-
-		// If we've reached here, it means the current attempt (with whatever client was used)
-		// resulted in an 'err'. The loop will check 'err' and decide to retry or break.
-		if err != nil && attempt < attempts-1 { // Log error before retrying
-			log.Warn("请求尝试 %d/%d 失败: %v. 等待 %v 后重试...", attempt+1, attempts, err, r.client.retryWait)
+		
+		// 3. 尝试直接连接
+		resp, err = r.tryDirectConnection(req)
+		if err == nil {
+			return resp, nil
 		}
+		lastErr = err
 	}
 	
-	log.Error("所有请求尝试都失败了")
+	// 所有尝试都失败
+	log.Error("所有请求尝试都失败了: %v", lastErr)
+	if lastErr != nil {
+		return nil, fmt.Errorf("请求失败: %w", lastErr)
+	}
 	return nil, fmt.Errorf("请求失败，无详细错误")
 }
 

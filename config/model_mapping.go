@@ -7,6 +7,7 @@ var ModelMapping = map[string]string{
 	"o4-mini":                        "scira-o4-mini",
 	"grok-3":                         "scira-grok-3",
 	"grok-3-mini":                    "scira-default",
-	"gemini-2.5-flash-preview-05-26": "scira-google",
+	"grok-2-vision":                  "scira-vision",
+	"gemini-2.5-flash-preview-05-20": "scira-google",
 	"gemini-2.5-pro-preview-05-06":   "scira-google-pro",
 }
