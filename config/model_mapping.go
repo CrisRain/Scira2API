@@ -2,7 +2,8 @@ package config
 
 // ModelMapping 定义模型名称映射
 var ModelMapping = map[string]string{
-	"claude-3.7-sonnet-thinking":     "scira-anthropic",
+	"claude-4-sonnet":                "scira-anthropic",
+	"claude-4-sonnet-thinking":       "scira-anthropic-thinking",
 	"gpt-4o":                         "scira-4o",
 	"o4-mini":                        "scira-o4-mini",
 	"grok-3":                         "scira-grok-3",
