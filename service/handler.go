@@ -3,7 +3,6 @@ package service
 import (
 	"errors"
 	"fmt"
-	"net/http"
 	"scira2api/config"
 	"scira2api/log"
 	"scira2api/models"
@@ -13,7 +12,6 @@ import (
 	httpClient "scira2api/pkg/http"
 	"scira2api/pkg/manager"
 	"scira2api/pkg/ratelimit"
-	"scira2api/proxy"
 	"strings"
 	"sync"
 	"time"
@@ -43,9 +41,6 @@ type ChatHandler struct {
 	// 用户与会话管理
 	userManager     *manager.UserManager    // 用户管理器
 	chatIdGenerator *manager.ChatIdGenerator // 会话ID生成器
-	
-	// 代理管理
-	proxyManager    *proxy.Manager          // 代理管理器
 	
 	// 性能优化组件
 	responseCache   *cache.ResponseCache    // 响应缓存
@@ -85,7 +80,6 @@ func newHandlerMetrics() *handlerMetrics {
 type ChatHandlerBuilder struct {
 	config      *config.Config
 	connPool    *connpool.ConnPool
-	proxyManager *proxy.Manager
 	client      *httpClient.HttpClient
 	userManager *manager.UserManager
 	chatIdGenerator *manager.ChatIdGenerator
@@ -108,7 +102,6 @@ func NewChatHandler(cfg *config.Config) *ChatHandler {
 	
 	// 按照依赖顺序初始化各组件
 	builder = builder.setupConnPool().
-		setupProxyManager().
 		setupHTTPClient().
 		setupManagers().
 		setupCache().
@@ -158,22 +151,12 @@ func (b *ChatHandlerBuilder) setupConnPool() *ChatHandlerBuilder {
 	return b
 }
 
-// setupProxyManager 设置代理管理器
-func (b *ChatHandlerBuilder) setupProxyManager() *ChatHandlerBuilder {
-	// 只有启用动态代理时才创建代理管理器
-	if b.config.Client.DynamicProxy {
-		b.proxyManager = proxy.NewManager()
-		log.Info("动态代理池已启用（支持HTTP/SOCKS4/SOCKS5代理）")
-	}
-	return b
-}
-
 // setupHTTPClient 设置HTTP客户端
 // 优化点: 分离HTTP客户端创建逻辑
 // 目的: 降低函数复杂度，提高可读性
 // 预期效果: 更模块化的代码结构
 func (b *ChatHandlerBuilder) setupHTTPClient() *ChatHandlerBuilder {
-	b.client = createHTTPClient(b.config, b.proxyManager)
+	b.client = createHTTPClient(b.config)
 	
 	// 如果启用了连接池，记录日志
 	if b.config.ConnPool.Enabled {
@@ -185,7 +168,7 @@ func (b *ChatHandlerBuilder) setupHTTPClient() *ChatHandlerBuilder {
 
 // setupManagers 设置管理器组件
 func (b *ChatHandlerBuilder) setupManagers() *ChatHandlerBuilder {
-	b.userManager = manager.NewUserManager(b.config.Auth.UserIds)
+	b.userManager = manager.NewUserManager()
 	b.chatIdGenerator = manager.NewChatIdGenerator(constants.ChatGroup)
 	return b
 }
@@ -247,7 +230,6 @@ func (b *ChatHandlerBuilder) build() *ChatHandler {
 		client:          b.client,
 		userManager:     b.userManager,
 		chatIdGenerator: b.chatIdGenerator,
-		proxyManager:    b.proxyManager,
 		responseCache:   b.responseCache,
 		connPool:        b.connPool,
 		rateLimiter:     b.rateLimiter,
@@ -259,7 +241,7 @@ func (b *ChatHandlerBuilder) build() *ChatHandler {
 // 优化点: 简化代理设置逻辑，优化代码结构
 // 目的: 提高代码可读性，统一代理处理逻辑
 // 预期效果: 更易于维护的代理配置代码
-func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *httpClient.HttpClient {
+func createHTTPClient(cfg *config.Config) *httpClient.HttpClient {
 	// 创建基础客户端
 	client := httpClient.NewHttpClient().
 		SetTimeout(cfg.Client.Timeout).
@@ -275,7 +257,7 @@ func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *httpClie
 	client.SetRetryMaxWaitTime(constants.RetryDelay * 5)
 
 	// 配置代理
-	configureClientProxy(client, cfg, proxyManager)
+	configureClientProxy(client, cfg)
 
 	return client
 }
@@ -284,11 +266,9 @@ func createHTTPClient(cfg *config.Config, proxyManager *proxy.Manager) *httpClie
 // 优化点: 分离代理配置逻辑，统一处理
 // 目的: 提高代码模块化，易于维护
 // 预期效果: 集中的代理配置逻辑，更清晰的代码结构
-func configureClientProxy(client *httpClient.HttpClient, cfg *config.Config, proxyManager *proxy.Manager) {
-	// 代理配置优先级：动态代理 > 静态SOCKS5代理 > 静态HTTP代理
+func configureClientProxy(client *httpClient.HttpClient, cfg *config.Config) {
+	// 代理配置优先级：静态SOCKS5代理 > 静态HTTP代理
 	switch {
-	case cfg.Client.DynamicProxy && proxyManager != nil:
-		configureDynamicProxy(client, proxyManager)
 	case cfg.Client.Socks5Proxy != "":
 		configureStaticSocks5Proxy(client, cfg.Client.Socks5Proxy)
 	case cfg.Client.HttpProxy != "":
@@ -296,29 +276,6 @@ func configureClientProxy(client *httpClient.HttpClient, cfg *config.Config, pro
 	default:
 		log.Info("未配置代理，将使用直接连接")
 	}
-}
-
-// configureDynamicProxy 配置动态代理
-func configureDynamicProxy(client *httpClient.HttpClient, proxyManager *proxy.Manager) {
-	// 设置代理管理器
-	client.SetProxyManager(proxyManager)
-	
-	// 为每个请求设置前置处理器，动态获取代理
-	client.OnBeforeRequest(func(req *http.Request) error {
-		proxyAddr, err := proxyManager.GetProxy()
-		if err != nil {
-			log.Warn("无法获取动态代理，将使用直接连接: %v", err)
-			client.SetProxy("") // 清除之前可能设置的代理
-			return nil          // 继续请求，但不使用代理
-		}
-		
-		// 获取代理类型
-		proxyType := getProxyTypeFromURL(proxyAddr)
-		log.Info("对请求 %s 使用动态代理(%s): %s", req.URL, proxyType, proxyAddr)
-		return nil
-	})
-	
-	log.Info("已配置动态代理管理器（支持HTTP/SOCKS4/SOCKS5代理）")
 }
 
 // configureStaticSocks5Proxy 配置静态SOCKS5代理
@@ -359,22 +316,6 @@ func configureStaticHttpProxy(client *httpClient.HttpClient, proxyAddr string) {
 	}
 	
 	log.Info("使用静态HTTP代理: %s", proxyAddr)
-}
-
-// getProxyTypeFromURL 从URL获取代理类型
-func getProxyTypeFromURL(proxyURL string) string {
-	switch {
-	case strings.HasPrefix(proxyURL, "http://"):
-		return "HTTP"
-	case strings.HasPrefix(proxyURL, "https://"):
-		return "HTTPS"
-	case strings.HasPrefix(proxyURL, "socks4://"):
-		return "SOCKS4"
-	case strings.HasPrefix(proxyURL, "socks5://"):
-		return "SOCKS5"
-	default:
-		return "unknown"
-	}
 }
 
 // getUserId 获取用户ID（轮询方式）
@@ -621,12 +562,6 @@ func (h *ChatHandler) Close() error {
 				// 无法直接访问底层Transport，仅记录日志
 				log.Info("HTTP客户端资源标记为释放")
 			}
-		}
-		
-		// 关闭代理池管理器
-		if h.proxyManager != nil {
-			h.proxyManager.Stop()
-			log.Info("代理池资源已成功释放")
 		}
 		
 		// 关闭响应缓存

@@ -134,7 +134,7 @@ func (h *ChatHandler) getRetryAttempts() int {
 // processStreamResponse 处理流式响应
 func (h *ChatHandler) processStreamResponse(ctx context.Context, c *gin.Context, request models.OpenAIChatCompletionsRequest, chatId, userId string, flusher http.Flusher, counter *TokenCounter) error {
 	// 将外部模型名称映射为内部模型名称
-	internalModel := MapModelName(request.Model)
+	internalModel := MapModelName(h.config, request.Model)
 	sciraRequest := request.ToSciraChatCompletionsRequest(internalModel, chatId, userId)
 
 	// 发送请求
@@ -193,7 +193,7 @@ func (h *ChatHandler) processResponseStream(ctx context.Context, c *gin.Context,
 
 			// Send SSE error message and [DONE]
 			errorMsgContent := fmt.Sprintf("Internal Server Error during stream processing. Details: %v", r)
-			h.sendPanicErrorSSE(c.Writer, flusher, GetExternalModelName(request.Model), errorMsgContent)
+			h.sendPanicErrorSSE(c.Writer, flusher, GetExternalModelName(h.config, request.Model), errorMsgContent)
 		}
 	}()
 
@@ -515,7 +515,11 @@ func (h *ChatHandler) sendFinalMessage(writer gin.ResponseWriter, flusher http.F
 // sendPanicErrorSSE sends a standardized SSE error message in case of a panic.
 func (h *ChatHandler) sendPanicErrorSSE(writer gin.ResponseWriter, flusher http.Flusher, model string, panicDetails string) {
 	// 确保使用外部模型名称
-	externalModel := GetExternalModelName(model)
+	// 注意：这里的 model 参数已经是外部模型名称了，因为它是从 request.Model 传递过来的，
+	// 而 request.Model 通常是客户端直接指定的外部模型名。
+	// 如果 model 是内部名，则需要 GetExternalModelName(h.config, model)
+	// 但在此上下文中，它更有可能是外部名。为保持一致性，我们假设它可能是内部名并进行转换。
+	externalModel := GetExternalModelName(h.config, model)
 	log.Info("Attempting to send panic error SSE to client.")
 
 	// Generate a new ID and timestamp for this panic event

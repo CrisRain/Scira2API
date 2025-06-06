@@ -9,7 +9,7 @@ import (
 	"scira2api/pkg/constants"
 	"scira2api/pkg/errors"
 	"strconv"
-	"strings"
+	"strings" // 新增导入
 	"time"
 
 	"github.com/joho/godotenv"
@@ -20,10 +20,10 @@ type Config struct {
 	Server          ServerConfig    `json:"server"`
 	Auth            AuthConfig      `json:"auth"`
 	Client          ClientConfig    `json:"client"`
-	Chat            ChatConfig      `json:"chat"`
 	Cache           CacheConfig     `json:"cache"`
 	ConnPool        ConnPoolConfig  `json:"conn_pool"`
 	RateLimit       RateLimitConfig `json:"rate_limit"`
+	ModelMappings   map[string]string `json:"model_mappings"` // 新增模型映射字段
 }
 
 // ServerConfig 服务器配置
@@ -37,25 +37,17 @@ type ServerConfig struct {
 // AuthConfig 认证配置
 type AuthConfig struct {
 	ApiKey  string   `json:"api_key"`
-	UserIds []string `json:"user_ids"`
 }
 
 // ClientConfig 客户端配置
 type ClientConfig struct {
 	HttpProxy       string        `json:"http_proxy"`
 	Socks5Proxy     string        `json:"socks5_proxy"`
-	DynamicProxy    bool          `json:"dynamic_proxy"`
-	ProxyRefreshMin time.Duration `json:"proxy_refresh_min"`
 	Timeout         time.Duration `json:"timeout"`
 	Retry           int           `json:"retry"`
 	BaseURL         string        `json:"base_url"`
 }
 
-
-// ChatConfig 聊天配置
-type ChatConfig struct {
-	Delete bool `json:"delete"`
-}
 
 // CacheConfig 缓存配置
 type CacheConfig struct {
@@ -98,7 +90,6 @@ func NewConfig() (*Config, error) {
 		{"server", config.loadServerConfig},
 		{"auth", config.loadAuthConfig},
 		{"client", config.loadClientConfig},
-		{"chat", config.loadChatConfig},
 		{"cache", config.loadCacheConfig},
 		{"conn_pool", config.loadConnPoolConfig},
 		{"rate_limit", config.loadRateLimitConfig},
@@ -114,6 +105,9 @@ func NewConfig() (*Config, error) {
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("%w: %v", errors.ErrConfigValidation, err)
 	}
+
+	// 加载模型映射
+	config.loadModelMappings() // 调用新的加载函数
 
 	return config, nil
 }
@@ -132,22 +126,6 @@ func (c *Config) loadServerConfig() error {
 func (c *Config) loadAuthConfig() error {
 	c.Auth.ApiKey = os.Getenv("APIKEY")
 
-	userIdsEnv := os.Getenv("USERIDS")
-	if userIdsEnv != "" {
-		userIds := strings.Split(userIdsEnv, ",")
-		// 清理用户ID，移除空白字符
-		var cleanUserIds []string
-		for _, id := range userIds {
-			if trimmed := strings.TrimSpace(id); trimmed != "" {
-				cleanUserIds = append(cleanUserIds, trimmed)
-			}
-		}
-		c.Auth.UserIds = cleanUserIds
-	} else {
-		// 如果没有设置USERIDS，使用默认用户ID
-		c.Auth.UserIds = []string{constants.DefaultUserId}
-	}
-	
 	return nil
 }
 
@@ -159,22 +137,6 @@ func (c *Config) loadClientConfig() error {
 	// 加载SOCKS5代理
 	c.Client.Socks5Proxy = getEnvWithDefault("SOCKS5_PROXY", "")
 	
-	// 加载动态代理配置
-	dynamicProxyStr := getEnvWithDefault("DYNAMIC_PROXY", "false")
-	dynamicProxy, err := strconv.ParseBool(dynamicProxyStr)
-	if err != nil {
-		return fmt.Errorf("DYNAMIC_PROXY must be true or false, got: %s", dynamicProxyStr)
-	}
-	c.Client.DynamicProxy = dynamicProxy
-	
-	// 加载代理刷新间隔
-	proxyRefreshStr := getEnvWithDefault("PROXY_REFRESH_MIN", "30m")
-	proxyRefresh, err := time.ParseDuration(proxyRefreshStr)
-	if err != nil {
-		return fmt.Errorf("invalid PROXY_REFRESH_MIN: %s, error: %v", proxyRefreshStr, err)
-	}
-	c.Client.ProxyRefreshMin = proxyRefresh
-	
 	// 加载其他客户端配置
 	c.Client.Timeout = time.Duration(getEnvAsInt("CLIENT_TIMEOUT", int(constants.DefaultClientTimeout.Seconds()))) * time.Second
 	c.Client.BaseURL = getEnvWithDefault("BASE_URL", constants.DefaultBaseURL)
@@ -185,17 +147,6 @@ func (c *Config) loadClientConfig() error {
 	return nil
 }
 
-
-// loadChatConfig 加载聊天配置
-func (c *Config) loadChatConfig() error {
-	chatDeleteStr := getEnvWithDefault("CHAT_DELETE", "false")
-	chatDelete, err := strconv.ParseBool(chatDeleteStr)
-	if err != nil {
-		return fmt.Errorf("CHAT_DELETE must be true or false, got: %s", chatDeleteStr)
-	}
-	c.Chat.Delete = chatDelete
-	return nil
-}
 
 // loadCacheConfig 加载缓存配置
 func (c *Config) loadCacheConfig() error {
@@ -300,6 +251,41 @@ func (c *Config) loadRateLimitConfig() error {
 	return nil
 }
 
+// loadModelMappings 加载模型映射配置
+func (c *Config) loadModelMappings() {
+	mappingsStr := os.Getenv("MODEL_MAPPINGS")
+	if mappingsStr == "" {
+		log.Info("MODEL_MAPPINGS not set, using default model mappings.")
+		c.ModelMappings = ModelMapping // 使用硬编码的默认值
+		return
+	}
+
+	mappings := make(map[string]string)
+	pairs := strings.Split(mappingsStr, ",")
+	for _, pair := range pairs {
+		parts := strings.SplitN(strings.TrimSpace(pair), ":", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			if key != "" && value != "" {
+				mappings[key] = value
+			} else {
+				log.Warn("Invalid model mapping pair (empty key or value): '%s' in MODEL_MAPPINGS", pair)
+			}
+		} else if strings.TrimSpace(pair) != "" { // 忽略完全空的pair，但对格式错误的pair发出警告
+			log.Warn("Invalid model mapping format: '%s' in MODEL_MAPPINGS, expected 'key:value'", pair)
+		}
+	}
+
+	if len(mappings) > 0 {
+		c.ModelMappings = mappings
+		log.Info("Loaded model mappings from MODEL_MAPPINGS environment variable.")
+	} else {
+		log.Warn("MODEL_MAPPINGS was set but no valid mappings were parsed, using default model mappings.")
+		c.ModelMappings = ModelMapping // 解析失败或无有效映射时，使用硬编码的默认值
+	}
+}
+
 // validate 验证配置
 func (c *Config) validate() error {
 	// 验证端口
@@ -356,10 +342,6 @@ func (c *Config) ApiKey() string {
 	return c.Auth.ApiKey
 }
 
-func (c *Config) UserIds() []string {
-	return c.Auth.UserIds
-}
-
 func (c *Config) HttpProxy() string {
 	return c.Client.HttpProxy
 }
@@ -368,18 +350,11 @@ func (c *Config) Socks5Proxy() string {
 	return c.Client.Socks5Proxy
 }
 
-func (c *Config) DynamicProxy() bool {
-	return c.Client.DynamicProxy
-}
-
-func (c *Config) ProxyRefreshMin() time.Duration {
-	return c.Client.ProxyRefreshMin
-}
-
 func (c *Config) Models() []string {
 	// 从ModelMapping中获取所有内部模型名称
 	internalModels := make(map[string]bool)
-	for _, internalName := range ModelMapping {
+	// 从 c.ModelMappings 获取模型名称
+	for _, internalName := range c.ModelMappings {
 		internalModels[internalName] = true
 	}
 	
@@ -396,10 +371,6 @@ func (c *Config) Retry() int {
 	return c.Client.Retry
 }
 
-func (c *Config) ChatDelete() bool {
-	return c.Chat.Delete
-}
-
 // GetModelMapping 返回模型映射。
 // 此函数允许其他包安全地访问 ModelMapping，
 // 而无需直接访问包级变量，从而保持封装性。
@@ -408,5 +379,18 @@ func (c *Config) GetModelMapping() map[string]string {
 	// 或者直接返回 ModelMapping 如果不担心外部修改。
 	// 为了简单和性能，这里直接返回。
 	// 如果需要更强的封装，可以考虑返回一个副本。
-	return ModelMapping
+	return c.ModelMappings
+}
+
+// ModelMapping 定义模型名称映射
+var ModelMapping = map[string]string{
+	"claude-4-sonnet":                "scira-anthropic",
+	"claude-4-sonnet-thinking":       "scira-anthropic-thinking",
+	"gpt-4o":                         "scira-4o",
+	"o4-mini":                        "scira-o4-mini",
+	"grok-3":                         "scira-grok-3",
+	"grok-3-mini":                    "scira-default",
+	"grok-2-vision":                  "scira-vision",
+	"gemini-2.5-flash-preview-05-20": "scira-google",
+	"gemini-2.5-pro-preview-05-06":   "scira-google-pro",
 }

@@ -224,8 +224,9 @@ func processLineData(line string, content, reasoningContent *string, usage *mode
 }
 
 // MapModelName 将外部模型名称映射为内部模型名称
-func MapModelName(externalName string) string {
-	if internalName, exists := config.ModelMapping[externalName]; exists {
+func MapModelName(cfg *config.Config, externalName string) string {
+	modelMappings := cfg.GetModelMapping()
+	if internalName, exists := modelMappings[externalName]; exists {
 		log.Debug("映射模型名称: %s -> %s", externalName, internalName)
 		return internalName
 	}
@@ -234,8 +235,9 @@ func MapModelName(externalName string) string {
 }
 
 // GetExternalModelName 将内部模型名称映射回外部模型名称
-func GetExternalModelName(internalName string) string {
-	for externalName, mappedName := range config.ModelMapping {
+func GetExternalModelName(cfg *config.Config, internalName string) string {
+	modelMappings := cfg.GetModelMapping()
+	for externalName, mappedName := range modelMappings {
 		if mappedName == internalName {
 			log.Debug("反向映射模型名称: %s -> %s", internalName, externalName)
 			return externalName

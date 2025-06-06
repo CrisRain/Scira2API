@@ -85,7 +85,6 @@ func NewTooManyRequestsError(message string, err error) *APIError {
 var (
 	ErrConfigLoad       = errors.New("failed to load configuration")
 	ErrConfigValidation = errors.New("configuration validation failed")
-	ErrMissingUserIDs   = errors.New("USERIDS is required")
 	ErrInvalidPort      = errors.New("invalid port number")
 	ErrEmptyUserList    = errors.New("user list cannot be empty")
 )

@@ -274,7 +274,7 @@ func (h *ChatHandler) getExternalModelName(model string, reqID string) string {
 		return model
 	} else {
 		// 如果传入的是内部模型名，尝试转换为外部模型名
-		externalName := GetExternalModelName(model)
+		externalName := GetExternalModelName(h.config, model)
 		log.Debug("[%s] 将内部模型名 %s 转换为外部模型名: %s", reqID, model, externalName)
 		return externalName
 	}
@@ -406,7 +406,7 @@ func (h *ChatHandler) createAndSendResponse(c *gin.Context, request models.OpenA
 // executeRequest 执行单次请求
 func (h *ChatHandler) executeRequest(ctx context.Context, request models.OpenAIChatCompletionsRequest, chatId, userId string, reqID string) (*httpClient.Response, error) {
 	// 将外部模型名称映射为内部模型名称
-	internalModel := MapModelName(request.Model)
+	internalModel := MapModelName(h.config, request.Model)
 	sciraRequest := request.ToSciraChatCompletionsRequest(internalModel, chatId, userId)
 
 	log.Debug("[%s] 发送请求到 %s，模型: %s -> %s", reqID, constants.APISearchEndpoint, request.Model, internalModel)
